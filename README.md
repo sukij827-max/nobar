@@ -44,10 +44,8 @@ Isi:
 - `B2_REGION` — contoh `us-east-005`; sesuaikan dengan region endpoint bucket B2 kamu.
 - `PORT` — Railway biasanya mengisi sendiri.
 
-Backblaze B2 S3-compatible API memakai endpoint sesuai region bucket dan AWS Signature V4. citeturn0search0turn0search7
-
 ## Backblaze B2
-Buat bucket private dan application key yang mempunyai izin object yang diperlukan. Endpoint S3 B2 berbentuk `https://s3.<region>.backblazeb2.com` dan region harus sesuai dengan endpoint bucket. citeturn0search0turn0search7
+Buat bucket private dan application key yang mempunyai izin object yang diperlukan. Endpoint S3 B2 berbentuk `https://s3.<region>.backblazeb2.com` dan region harus sesuai dengan endpoint bucket. B2 S3-compatible API menggunakan AWS Signature V4.
 
 Atur CORS bucket agar domain Mini App boleh melakukan `PUT` dan membaca header `ETag`. Contoh:
 
