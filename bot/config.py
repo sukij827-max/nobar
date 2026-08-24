@@ -22,15 +22,9 @@ class Settings:
 
 def settings():
     required = [
-        'BOT_TOKEN',
-        'DATABASE_URL',
-        'OWNER_ID',
-        'REQUIRED_CHANNEL',
-        'WEBAPP_URL',
-        'B2_ENDPOINT',
-        'B2_BUCKET',
-        'B2_KEY_ID',
-        'B2_APPLICATION_KEY',
+        'BOT_TOKEN', 'DATABASE_URL', 'OWNER_ID', 'REQUIRED_CHANNEL',
+        'WEBAPP_URL', 'B2_ENDPOINT', 'B2_BUCKET', 'B2_KEY_ID',
+        'B2_APPLICATION_KEY'
     ]
     missing = [name for name in required if not os.getenv(name)]
     if missing:
@@ -50,6 +44,6 @@ def settings():
         b2_bucket=os.environ['B2_BUCKET'],
         b2_key_id=os.environ['B2_KEY_ID'],
         b2_application_key=os.environ['B2_APPLICATION_KEY'],
-        b2_region=os.getenv('B2_REGION', 'auto'),
+        b2_region=os.getenv('B2_REGION', 'us-east-005'),
         port=int(os.getenv('PORT', '8000')),
     )
