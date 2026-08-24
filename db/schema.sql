@@ -1,3 +1,0 @@
--- PostgreSQL schema reference.
--- Runtime migrations are performed by bot/db.py so existing Railway
--- databases with older columns/foreign keys can be repaired safely.
