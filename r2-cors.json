@@ -1,9 +1,0 @@
-[
-  {
-    "AllowedOrigins": ["https://YOUR-MINI-APP-DOMAIN"],
-    "AllowedMethods": ["PUT", "GET", "HEAD"],
-    "AllowedHeaders": ["*"],
-    "ExposeHeaders": ["ETag"],
-    "MaxAgeSeconds": 3600
-  }
-]
