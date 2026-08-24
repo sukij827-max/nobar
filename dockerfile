@@ -3,4 +3,4 @@ WORKDIR /app
 COPY requiredmenst.txt .
 RUN pip install --no-cache-dir -r requiredmenst.txt
 COPY . .
-CDM ["phyton","-m","bot.main"]
+CMD ["phyton","-m","bot.main"]
