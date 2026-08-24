@@ -1,25 +1,33 @@
 # Nobar Telegram — 5 GiB production layout
 
-Arsitektur final memakai **Telegram Bot + Telegram Mini App + PostgreSQL + Cloudflare R2**.
+Arsitektur final memakai **Telegram Bot + Telegram Mini App + PostgreSQL + Backblaze B2**.
 
-## Kenapa bukan GitHub untuk film?
-GitHub Contents API bukan object storage untuk film besar. Versi ini tidak lagi membuat ZIP film atau menyimpan film di GitHub.
+## Penyimpanan film
+Film **tidak disimpan di GitHub** dan tidak ditampung di Railway. GitHub hanya menyimpan source code. Film dikirim langsung dari browser Mini App ke Backblaze B2 memakai S3-compatible multipart upload.
 
 ## Batas upload
-Film maksimal **5 GiB** per object. Upload dilakukan dengan **S3 multipart upload** langsung dari browser ke R2, 4 part paralel, ukuran part 64 MiB. R2 mendukung multipart upload dan jauh lebih cocok untuk video besar.
+Film maksimal **5 GiB** per object. Upload memakai multipart upload dengan part 64 MiB dan 4 worker paralel di browser.
 
 ## Alur
 1. `/nobar` membuat room.
 2. Host membuka Mini App.
 3. Host memilih video maksimal 5 GiB.
 4. Backend membuat multipart upload dan presigned URL.
-5. Browser mengirim part langsung ke R2 — Railway tidak menampung file 5 GiB.
-6. Backend memverifikasi ukuran object lalu otomatis memasang film ke room.
-7. Mini App memakai presigned GET URL R2 untuk streaming, sehingga browser dapat melakukan range request/seek tanpa download seluruh film ke Railway.
-8. Host mengontrol play/pause/seek; penonton melakukan sync otomatis setiap detik.
+5. Browser mengirim part langsung ke B2 — Railway tidak menampung file 5 GiB.
+6. Backend memverifikasi seluruh part dan ukuran object lalu memasang film ke room.
+7. Mini App memakai presigned GET URL B2 untuk streaming dan seek.
+8. Host mengontrol play/pause/seek; penonton melakukan sinkronisasi otomatis.
 
-## Penting: `/addfilm`
-Telegram Bot API resmi saat ini hanya mengizinkan bot **mengunduh file sampai 20 MB**. Karena itu film besar **tidak boleh** diambil dengan `bot.download_file()`. Gunakan `/upload` atau tombol upload di Mini App.
+## Command
+- `/nobar` — membuat room di grup.
+- `/join KODE` — masuk room.
+- `/room KODE` — melihat status room.
+- `/play KODE` — membuka Mini App.
+- `/upload KODE` — membuka uploader khusus host.
+- `/rooms` — melihat room aktif di grup.
+- `/broadcast` — owner mengirim broadcast dengan reply pesan.
+
+`/addfilm` tidak lagi mengunduh film melalui Telegram Bot API. Film besar harus memakai Mini App supaya file tidak melewati Railway.
 
 ## Environment Railway
 Isi:
@@ -29,18 +37,19 @@ Isi:
 - `OWNER_ID`
 - `REQUIRED_CHANNEL`
 - `WEBAPP_URL`
-- `R2_ENDPOINT`
-- `R2_BUCKET`
-- `R2_ACCESS_KEY_ID`
-- `R2_SECRET_ACCESS_KEY`
-- `R2_REGION=auto`
-- `PORT` (Railway biasanya mengisi sendiri)
+- `B2_ENDPOINT`
+- `B2_BUCKET`
+- `B2_KEY_ID`
+- `B2_APPLICATION_KEY`
+- `B2_REGION` — contoh `us-east-005`; sesuaikan dengan region endpoint bucket B2 kamu.
+- `PORT` — Railway biasanya mengisi sendiri.
 
-## Cloudflare R2
-Buat bucket private, API token dengan permission object read/write, lalu isi endpoint berbentuk:
-`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
+Backblaze B2 S3-compatible API memakai endpoint sesuai region bucket dan AWS Signature V4. citeturn0search0turn0search7
 
-Atur CORS bucket agar Mini App boleh `PUT` ke R2 dan membaca header `ETag`. Contoh minimal:
+## Backblaze B2
+Buat bucket private dan application key yang mempunyai izin object yang diperlukan. Endpoint S3 B2 berbentuk `https://s3.<region>.backblazeb2.com` dan region harus sesuai dengan endpoint bucket. citeturn0search0turn0search7
+
+Atur CORS bucket agar domain Mini App boleh melakukan `PUT` dan membaca header `ETag`. Contoh:
 
 ```json
 [
@@ -55,7 +64,7 @@ Atur CORS bucket agar Mini App boleh `PUT` ke R2 dan membaca header `ETag`. Cont
 ```
 
 ## Database
-`schema.sql` memakai `CREATE TABLE IF NOT EXISTS` dan `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, jadi database lama dapat melakukan migrasi ringan saat startup.
+`schema.sql` melakukan migrasi idempotent untuk tabel yang dipakai bot. Film upload sekarang memiliki `room_id` sehingga upload gagal/ulang pada satu room tidak mencampur upload room lain.
 
 ## Streaming
-Film tidak diextract ke `/tmp`, tidak di-zip ulang, dan tidak di-download ke Railway. R2 mengirim file langsung ke browser memakai presigned URL. Ini jauh lebih aman untuk film multi-GB.
+Film tidak diekstrak ke `/tmp`, tidak di-zip ulang, dan tidak di-download ke Railway. B2 mengirim object langsung ke browser melalui presigned URL.
