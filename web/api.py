@@ -8,7 +8,7 @@ from aiogram.types import Update
 from pydantic import BaseModel,Field
 from sqlalchemy import select,func
 from config import settings
-from db import Session,Room,Member,Film
+from db import Session,Room,Member,Film,init_db,close_db
 from storage import presigned_put,presigned_get
 from bot.runtime import bot,dp
 app=FastAPI(title='NOBAR Mini App',docs_url=None,redoc_url=None);STATIC=Path(__file__).parent/'static';app.mount('/static',StaticFiles(directory=STATIC),name='static')
@@ -20,10 +20,15 @@ def user(init):
         if not hmac.compare_digest(exp,h):return None
         return json.loads(p.get('user','{}'))
     except Exception:return None
-class SyncIn(BaseModel):init_data:str='';playing:bool=False;position:float=Field(ge=0)
-class UploadIn(BaseModel):init_data:str='';title:str=Field(min_length=1,max_length=255);size:int=Field(gt=0,le=5*1024**3);mime:str='video/mp4'
+@app.on_event('startup')
+async def startup():
+    await init_db();webhook=f'{settings.webapp_url.rstrip("/")}/telegram/webhook';secret=hmac.new(settings.bot_token.encode(),settings.webapp_url.encode(),hashlib.sha256).hexdigest()[:32];await bot.get_me();await bot.set_webhook(webhook,secret_token=secret,drop_pending_updates=False,allowed_updates=['message','callback_query','chat_member','my_chat_member'])
+@app.on_event('shutdown')
+async def shutdown():
+    try:await bot.delete_webhook(drop_pending_updates=False);await bot.session.close()
+    finally:await close_db()
 @app.get('/health')
-async def health():return {'status':'ok','service':'nobar','version':'1.0'}
+async def health():return {'status':'ok','service':'nobar','version':'1.1'}
 @app.post('/telegram/webhook')
 async def telegram_webhook(request:Request):
     secret=request.headers.get('X-Telegram-Bot-Api-Secret-Token');expected=hmac.new(settings.bot_token.encode(),settings.webapp_url.encode(),hashlib.sha256).hexdigest()[:32]
@@ -59,16 +64,17 @@ async def dashboard(group_id:int,init_data:str=''):
         for r in rows:
             n=await s.scalar(select(func.count()).select_from(Member).where(Member.room_id==r.id));out.append({'code':r.code,'title':r.title,'host_id':r.host_user_id,'members':n,'playing':r.is_playing,'position':r.position})
     return {'group_id':group_id,'rooms':out}
+class SyncIn(BaseModel):init_data:str='';playing:bool=False;position:float=Field(ge=0)
 @app.post('/api/sync/{code}')
 async def sync(code:str,p:SyncIn):
     u=user(p.init_data);r=await room_for(code)
     if not u or int(u['id'])!=r.host_user_id:raise HTTPException(403,'Host only')
     async with Session() as s:x=await s.get(Room,r.id);x.is_playing=p.playing;x.position=p.position;await s.commit()
     return {'ok':True}
+class UploadIn(BaseModel):init_data:str='';title:str=Field(min_length=1,max_length=255);size:int=Field(gt=0,le=5*1024**3);mime:str='video/mp4'
 @app.post('/api/upload/{code}')
 async def upload(code:str,p:UploadIn):
     u=user(p.init_data);r=await room_for(code)
     if not u or int(u['id'])!=r.host_user_id:raise HTTPException(403,'Host only')
-    key=f'films/{r.group_chat_id}/{r.code}/{secrets.token_hex(12)}-{p.title.replace("/","_")}'
-    async with Session() as s:s.add(Film(room_id=r.id,owner_user_id=r.host_user_id,title=p.title,object_key=key,size_bytes=p.size,mime_type=p.mime));await s.commit()
+    key=f'films/{r.group_chat_id}/{r.code}/{secrets.token_hex(12)}-{p.title.replace("/","_")}';async with Session() as s:s.add(Film(room_id=r.id,owner_user_id=r.host_user_id,title=p.title,object_key=key,size_bytes=p.size,mime_type=p.mime));await s.commit()
     return {'upload_url':presigned_put(key,p.mime),'object_key':key}
