@@ -3,12 +3,13 @@ from urllib.parse import parse_qsl
 from pathlib import Path
 from fastapi import FastAPI,HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel,Field
 from sqlalchemy import select,func
 from config import settings
 from db import Session,Room,Member,Film
 from storage import presigned_put,presigned_get
-app=FastAPI(title='NOBAR Mini App',docs_url=None,redoc_url=None); STATIC=Path(__file__).parent/'static'
+app=FastAPI(title='NOBAR Mini App',docs_url=None,redoc_url=None); STATIC=Path(__file__).parent/'static'; app.mount('/static',StaticFiles(directory=STATIC),name='static')
 def user(init):
     try:
         p=dict(parse_qsl(init,keep_blank_values=True)); h=p.pop('hash',None); auth=int(p.get('auth_date','0'))
