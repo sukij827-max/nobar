@@ -1,10 +1,7 @@
 import asyncio,logging,threading,time,uvicorn
-from aiogram import Bot,Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from config import settings
 from db import init_db,close_db
-from bot.handlers import router
+from bot.runtime import bot
 from web.app import app
 class Server(uvicorn.Server):
     def install_signal_handlers(self):pass
@@ -16,7 +13,11 @@ def start_web():
         time.sleep(.05)
     raise RuntimeError('Web server startup timeout.')
 async def main():
-    logging.basicConfig(level=logging.INFO,format='%(asctime)s | %(levelname)s | %(message)s');await init_db();server=start_web();bot=Bot(settings.bot_token,default=DefaultBotProperties(parse_mode=ParseMode.HTML));dp=Dispatcher();dp.include_router(router)
-    try: await bot.delete_webhook(drop_pending_updates=False); await bot.get_me(); await dp.start_polling(bot,allowed_updates=dp.resolve_used_update_types())
-    finally: server.should_exit=True; await bot.session.close(); await close_db()
+    logging.basicConfig(level=logging.INFO,format='%(asctime)s | %(levelname)s | %(message)s');await init_db();server=start_web();await bot.get_me()
+    webhook=f'{settings.webapp_url.rstrip("/")}/telegram/webhook'
+    await bot.set_webhook(webhook,drop_pending_updates=False,allowed_updates=['message','callback_query','chat_member','my_chat_member'])
+    try:
+        while True: await asyncio.sleep(3600)
+    finally:
+        await bot.delete_webhook(drop_pending_updates=False);server.should_exit=True;await bot.session.close();await close_db()
 if __name__=='__main__':asyncio.run(main())
