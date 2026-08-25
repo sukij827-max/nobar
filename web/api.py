@@ -1,4 +1,4 @@
-import hashlib,hmac,json,time,secrets
+import hashlib,hmac,json,time,secrets,logging
 from urllib.parse import parse_qsl
 from pathlib import Path
 from fastapi import FastAPI,HTTPException,Request
@@ -11,6 +11,7 @@ from config import settings
 from db import Session,Room,Member,Film,init_db,close_db
 from storage import presigned_put,presigned_get
 from bot.runtime import bot,dp
+log=logging.getLogger(__name__)
 app=FastAPI(title='NOBAR Mini App',docs_url=None,redoc_url=None);STATIC=Path(__file__).parent/'static';app.mount('/static',StaticFiles(directory=STATIC),name='static')
 def user(init):
     try:
@@ -28,13 +29,16 @@ async def shutdown():
     try:await bot.delete_webhook(drop_pending_updates=False);await bot.session.close()
     finally:await close_db()
 @app.get('/health')
-async def health():return {'status':'ok','service':'nobar','version':'1.1'}
+async def health():return {'status':'ok','service':'nobar','version':'1.2'}
 @app.post('/telegram/webhook')
 async def telegram_webhook(request:Request):
     secret=request.headers.get('X-Telegram-Bot-Api-Secret-Token');expected=hmac.new(settings.bot_token.encode(),settings.webapp_url.encode(),hashlib.sha256).hexdigest()[:32]
     if not secret or not hmac.compare_digest(secret,expected):raise HTTPException(403,'Invalid webhook secret')
-    try:update=Update.model_validate(await request.json());await dp.feed_update(bot,update);return {'ok':True}
-    except Exception:raise HTTPException(400,'Invalid Telegram update')
+    try:
+        payload=await request.json();update=Update.model_validate(payload);await dp.feed_update(bot,update);return {'ok':True}
+    except Exception as exc:
+        log.exception('Telegram webhook failed')
+        raise HTTPException(500,'Webhook processing failed') from exc
 @app.get('/')
 async def home():return FileResponse(STATIC/'index.html',headers={'Cache-Control':'no-store'})
 @app.get('/miniapp')
