@@ -76,5 +76,7 @@ class UploadIn(BaseModel):init_data:str='';title:str=Field(min_length=1,max_leng
 async def upload(code:str,p:UploadIn):
     u=user(p.init_data);r=await room_for(code)
     if not u or int(u['id'])!=r.host_user_id:raise HTTPException(403,'Host only')
-    key=f'films/{r.group_chat_id}/{r.code}/{secrets.token_hex(12)}-{p.title.replace("/","_")}';async with Session() as s:s.add(Film(room_id=r.id,owner_user_id=r.host_user_id,title=p.title,object_key=key,size_bytes=p.size,mime_type=p.mime));await s.commit()
+    key=f'films/{r.group_chat_id}/{r.code}/{secrets.token_hex(12)}-{p.title.replace("/","_")}'
+    async with Session() as s:
+        s.add(Film(room_id=r.id,owner_user_id=r.host_user_id,title=p.title,object_key=key,size_bytes=p.size,mime_type=p.mime));await s.commit()
     return {'upload_url':presigned_put(key,p.mime),'object_key':key}
