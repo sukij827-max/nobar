@@ -1,212 +1,80 @@
-import asyncio
-import html
-import secrets
-import string
-
-import asyncpg
-from aiogram import Bot, Router
-from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
-
-router = Router()
-
-
-def code():
-    return ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
-
-
-def kb(url):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text='🎬 Buka Nobar', web_app=WebAppInfo(url=url))]]
-    )
-
-
-async def access(m, bot, settings):
+import html,secrets,string
+from aiogram import Router,Bot
+from aiogram.filters import Command,CommandStart
+from aiogram.types import Message,InlineKeyboardMarkup,InlineKeyboardButton,WebAppInfo
+from db import Session,User,Room,Member
+from sqlalchemy import select,func
+from config import settings
+router=Router()
+def code(): return ''.join(secrets.choice(string.ascii_uppercase+string.digits) for _ in range(6))
+def web(room,upload=False): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🎬 Buka Nobar',web_app=WebAppInfo(url=f'{settings.webapp_url}/miniapp?room={room.code}&upload={1 if upload else 0}'))]])
+async def access(m:Message,bot:Bot):
     try:
-        member = await bot.get_chat_member(settings.required_channel, m.from_user.id)
-        ok = member.status in {'member', 'administrator', 'creator'}
-    except Exception:
-        ok = False
-    if not ok:
-        await m.answer(f'⚠️ Join channel {html.escape(settings.required_channel)} dulu.')
-        return False
-    return True
-
-
-async def create_room_with_retry(db, group_id, user_id, title, attempts=5):
-    for _ in range(attempts):
-        try:
-            return await db.make_room(code(), group_id, user_id, title)
-        except asyncpg.UniqueViolationError:
-            continue
-    raise RuntimeError('Gagal membuat kode room unik. Silakan coba lagi.')
-
-
+        x=await bot.get_chat_member(settings.required_channel,m.from_user.id); return x.status in {'member','administrator','creator'}
+    except Exception:return False
+async def ensure_user(u):
+    async with Session() as s:
+        x=await s.get(User,u.id)
+        if not x: s.add(User(user_id=u.id,username=u.username,first_name=u.first_name))
+        else: x.username=u.username;x.first_name=u.first_name
+        await s.commit()
 @router.message(CommandStart())
-async def start(m: Message, bot: Bot, settings, db):
-    await db.user(m.from_user)
-    if await access(m, bot, settings):
-        await m.answer(
-            '🎬 <b>Nobar</b>\nGunakan /nobar di grup untuk membuat room. '
-            'Setelah room dibuat, host upload film sampai 5 GiB langsung dari Mini App.'
-        )
-
-
+async def start(m:Message,bot:Bot):
+    await ensure_user(m.from_user)
+    if not await access(m,bot): return await m.answer(f'⚠️ Join {html.escape(settings.required_channel)} dulu.')
+    await m.answer('🎬 <b>NOBAR</b>\nBuat room di GC dengan /nobar.')
 @router.message(Command('help'))
-async def help_command(m):
-    await m.answer(
-        '/nobar — buat room grup\n'
-        '/join KODE — join\n'
-        '/room KODE — info\n'
-        '/play KODE — buka Mini App\n'
-        '/rooms — room aktif\n'
-        '/upload KODE — buka uploader host\n'
-        '/broadcast — owner, reply teks/foto'
-    )
-
-
+async def help_(m): await m.answer('/nobar — buat room\n/join KODE — masuk room\n/room KODE — status\n/play KODE — buka Mini App\n/upload KODE — upload film\n/rooms — room aktif di GC')
 @router.message(Command('nobar'))
-async def nobar(m, bot, settings, db):
-    if m.chat.type not in {'group', 'supergroup'}:
-        return await m.answer('Gunakan /nobar di grup.')
-    if not await access(m, bot, settings):
-        return
-
-    await db.user(m.from_user)
-    await db.group(m.chat)
-    title = m.text.partition(' ')[2].strip() or f'Nobar {m.from_user.first_name}'
-    title = title[:200]
-    r = await create_room_with_retry(db, m.chat.id, m.from_user.id, title)
-    await db.join(r['id'], m.from_user.id)
-    safe_title = html.escape(title)
-    await m.answer(
-        f'🍿 <b>Room dibuat</b>\n{safe_title}\n'
-        f'Kode: <code>{r["code"]}</code>\n'
-        'Host bisa upload film maksimal 5 GiB dari Mini App.',
-        reply_markup=kb(f'{settings.webapp_url}/?room={r["code"]}'),
-    )
-
-
+async def nobar(m:Message,bot:Bot):
+    if m.chat.type not in {'group','supergroup'}: return await m.answer('Gunakan /nobar di GC.')
+    if not await access(m,bot): return await m.answer(f'⚠️ Join {html.escape(settings.required_channel)} dulu.')
+    await ensure_user(m.from_user); title=(m.text.partition(' ')[2].strip() or f'Nobar {m.from_user.first_name}')[:200]
+    async with Session() as s:
+        for _ in range(8):
+            c=code()
+            if not await s.scalar(select(Room).where(Room.code==c)): break
+        r=Room(code=c,group_chat_id=m.chat.id,host_user_id=m.from_user.id,title=title);s.add(r);await s.flush();s.add(Member(room_id=r.id,user_id=m.from_user.id));await s.commit();await s.refresh(r)
+    await m.answer(f'🍿 <b>Room dibuat</b>\n{html.escape(title)}\nKode: <code>{r.code}</code>',reply_markup=web(r))
 @router.message(Command('join'))
-async def join(m, bot, settings, db):
-    if not await access(m, bot, settings):
-        return
-    await db.user(m.from_user)
-    args = m.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await m.answer('Gunakan: /join KODE')
-    r = await db.room(args[1])
-    if not r:
-        return await m.answer('❌ Room tidak ditemukan.')
-    await db.join(r['id'], m.from_user.id)
-    await m.answer(
-        f'✅ Masuk {html.escape(r["title"])}',
-        reply_markup=kb(f'{settings.webapp_url}/?room={r["code"]}'),
-    )
-
-
-@router.message(Command('room'))
-async def room(m, bot, settings, db):
-    if not await access(m, bot, settings):
-        return
-    await db.user(m.from_user)
-    args = m.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await m.answer('Gunakan: /room KODE')
-    r = await db.room(args[1])
-    if not r:
-        return await m.answer('❌ Room tidak ditemukan.')
-    await m.answer(
-        f'🎬 {html.escape(r["title"])}\n'
-        f'Kode: {r["code"]}\n'
-        f'Status: {"▶️ Playing" if r["is_playing"] else "⏸️ Paused"}\n'
-        f'Posisi: {int(r["position_seconds"])} detik'
-    )
-
-
-@router.message(Command('play'))
-async def play(m, bot, settings, db):
-    if not await access(m, bot, settings):
-        return
-    await db.user(m.from_user)
-    args = m.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await m.answer('Gunakan: /play KODE')
-    r = await db.room(args[1])
-    if not r:
-        return await m.answer('❌ Room tidak ditemukan.')
-    await db.join(r['id'], m.from_user.id)
-    await m.answer('🎥 Buka Mini App:', reply_markup=kb(f'{settings.webapp_url}/?room={r["code"]}'))
-
-
-@router.message(Command('upload'))
-async def upload(m, bot, settings, db):
-    if not await access(m, bot, settings):
-        return
-    await db.user(m.from_user)
-    args = m.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await m.answer('Gunakan: /upload KODE')
-    r = await db.room(args[1])
-    if not r:
-        return await m.answer('❌ Room tidak ditemukan.')
-    if r['host_user_id'] != m.from_user.id:
-        return await m.answer('❌ Hanya host room yang boleh upload film.')
-    await db.join(r['id'], m.from_user.id)
-    await m.answer(
-        '⬆️ Buka uploader:',
-        reply_markup=kb(f'{settings.webapp_url}/?room={r["code"]}&upload=1'),
-    )
-
-
+async def join(m:Message,bot:Bot):
+    if not await access(m,bot): return
+    parts=m.text.split(maxsplit=1)
+    if len(parts)<2:return await m.answer('Gunakan /join KODE')
+    await ensure_user(m.from_user)
+    async with Session() as s:
+        r=await s.scalar(select(Room).where(Room.code==parts[1].upper(),Room.is_active.is_(True)))
+        if not r:return await m.answer('❌ Room tidak ditemukan.')
+        if r.group_chat_id!=m.chat.id:return await m.answer('❌ Room ini milik GC lain.')
+        if not await s.scalar(select(Member).where(Member.room_id==r.id,Member.user_id==m.from_user.id)):s.add(Member(room_id=r.id,user_id=m.from_user.id));await s.commit()
+    await m.answer(f'✅ Masuk <b>{html.escape(r.title)}</b>',reply_markup=web(r))
 @router.message(Command('rooms'))
-async def rooms(m, bot, settings, db):
-    if not await access(m, bot, settings):
-        return
-    await db.user(m.from_user)
-    if m.chat.type not in {'group', 'supergroup'}:
-        return await m.answer('Gunakan /rooms di grup.')
-    rows = await db.pool.fetch(
-        'SELECT code,title FROM rooms WHERE group_chat_id=$1 AND is_active ORDER BY created_at DESC',
-        m.chat.id,
-    )
-    if not rows:
-        return await m.answer('Tidak ada nobar aktif.')
-    text = '\n'.join(f'🎬 {x["code"]} — {html.escape(x["title"])}' for x in rows)
-    await m.answer(text)
-
-
-@router.message(Command('addfilm'))
-async def addfilm(m, bot, settings, db):
-    if not await access(m, bot, settings):
-        return
-    await m.answer(
-        'ℹ️ /addfilm tidak lagi dipakai untuk menyimpan film. '
-        'Gunakan /upload KODE agar film dikirim langsung dari Mini App ke B2. '
-        'Batas upload 5 GiB.'
-    )
-
-
-@router.message(Command('broadcast'))
-async def broadcast(m, bot, settings, db):
-    if m.from_user.id != settings.owner_id:
-        return await m.answer('❌ Khusus owner.')
-    t = m.reply_to_message
-    if not t:
-        return await m.answer('Reply pesan teks atau foto lalu /broadcast.')
-
-    rows = await db.pool.fetch('SELECT user_id FROM users WHERE user_id IS NOT NULL')
-    ok = 0
-    for x in rows:
-        try:
-            if t.photo:
-                await bot.send_photo(x['user_id'], t.photo[-1].file_id, caption=t.caption or '')
-            elif t.text:
-                await bot.send_message(x['user_id'], t.text)
-            else:
-                await bot.copy_message(x['user_id'], m.chat.id, t.message_id)
-            ok += 1
-        except Exception:
-            pass
-        await asyncio.sleep(0.04)
-    await m.answer(f'📣 Broadcast selesai: {ok}/{len(rows)}')
+async def rooms(m:Message,bot:Bot):
+    if m.chat.type not in {'group','supergroup'}:return await m.answer('Gunakan /rooms di GC.')
+    if not await access(m,bot):return
+    async with Session() as s: rows=(await s.scalars(select(Room).where(Room.group_chat_id==m.chat.id,Room.is_active.is_(True)).order_by(Room.created_at.desc()).limit(20))).all()
+    if not rows:return await m.answer('Tidak ada room aktif di GC ini.')
+    await m.answer('\n'.join(f'🎬 <code>{r.code}</code> — {html.escape(r.title)}' for r in rows))
+async def open_room(m,bot,cmd,upload=False):
+    if not await access(m,bot):return
+    p=m.text.split(maxsplit=1)
+    if len(p)<2:return await m.answer(f'Gunakan /{cmd} KODE')
+    async with Session() as s:r=await s.scalar(select(Room).where(Room.code==p[1].upper(),Room.is_active.is_(True)))
+    if not r:return await m.answer('❌ Room tidak ditemukan.')
+    if r.group_chat_id!=m.chat.id:return await m.answer('❌ Room ini bukan milik GC ini.')
+    if upload and r.host_user_id!=m.from_user.id:return await m.answer('❌ Hanya host yang boleh upload.')
+    await m.answer('🎬 Buka Mini App:',reply_markup=web(r,upload))
+@router.message(Command('play'))
+async def play(m,bot):await open_room(m,bot,'play')
+@router.message(Command('upload'))
+async def upload(m,bot):await open_room(m,bot,'upload',True)
+@router.message(Command('room'))
+async def room(m,bot):
+    if not await access(m,bot):return
+    p=m.text.split(maxsplit=1)
+    if len(p)<2:return await m.answer('Gunakan /room KODE')
+    async with Session() as s:
+        r=await s.scalar(select(Room).where(Room.code==p[1].upper())); n=await s.scalar(select(func.count()).select_from(Member).where(Member.room_id==r.id)) if r else 0
+    if not r:return await m.answer('❌ Room tidak ditemukan.')
+    if r.group_chat_id!=m.chat.id:return await m.answer('❌ Room ini bukan milik GC ini.')
+    await m.answer(f'🎬 {html.escape(r.title)}\n👥 {n} peserta\n{"▶️ Playing" if r.is_playing else "⏸️ Paused"}\nPosisi: {int(r.position)} detik')
