@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from bot.runtime import bot, start_polling, stop_polling
+from bot.runtime import bot, start_polling, stop_polling, _polling_task
 from config import settings
 from db import Film, Member, Room, Session, close_db, init_db
 from storage import presigned_get, presigned_put
@@ -43,7 +43,6 @@ def telegram_user(init_data: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Clean startup order: database first, then exactly one Telegram consumer.
     await init_db()
     try:
         await start_polling()
@@ -71,12 +70,15 @@ async def health():
         me = None
         telegram_ok = False
         telegram_error = str(exc)
+    task = _polling_task
+    polling_active = bool(task and not task.done())
     return {
-        "status": "ok" if telegram_ok else "degraded",
+        "status": "ok" if telegram_ok and polling_active else "degraded",
         "service": "nobar",
         "telegram": {
             "mode": "polling",
             "connected": telegram_ok,
+            "polling_active": polling_active,
             "bot_id": me.id if me else None,
             "bot_username": me.username if me else None,
             "error": telegram_error,
@@ -109,12 +111,7 @@ async def dashboard(group_id: int, init_data: str = ""):
         raise HTTPException(401, "Telegram auth required")
     uid = int(user["id"])
     async with Session() as session:
-        allowed = await session.scalar(
-            select(Member.id)
-            .join(Room, Room.id == Member.room_id)
-            .where(Room.group_chat_id == group_id, Member.user_id == uid, Room.is_active.is_(True))
-            .limit(1)
-        )
+        allowed = await session.scalar(select(Member.id).join(Room, Room.id == Member.room_id).where(Room.group_chat_id == group_id, Member.user_id == uid, Room.is_active.is_(True)).limit(1))
         if allowed is None:
             raise HTTPException(403, "Akses dashboard GC ditolak")
         rooms = (await session.scalars(select(Room).where(Room.group_chat_id == group_id, Room.is_active.is_(True)).order_by(Room.created_at.desc()).limit(30))).all()
