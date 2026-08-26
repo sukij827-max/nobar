@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy import func, select
 
 from config import settings
-from db import Member, Room, Session, User
+from db import Film, Member, Room, Session, User
 from bot import handlers as legacy
 from bot import direct_room
 
@@ -16,25 +16,38 @@ router = Router()
 
 
 def safe_room_menu(room):
-    """Never put web_app buttons in group messages; Telegram only permits them in private chats."""
+    """Private chats may launch the Mini App directly. Group invites use a
+    Telegram startapp deep link so the group button opens the Mini App instead
+    of sending the viewer through /start."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎬 Buka NOBAR", callback_data=f"openroom:{room.id}")],
-        [InlineKeyboardButton(text="📤 Upload Film", callback_data=f"roomupload:{room.id}"), InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"share:{room.id}")],
-        [InlineKeyboardButton(text="🎞️ Info Film", callback_data=f"roomfilm:{room.id}"), InlineKeyboardButton(text="👥 Member", callback_data=f"roommembers:{room.id}")],
-        [InlineKeyboardButton(text="🚪 Keluar Room", callback_data=f"leave:{room.id}")],
+        [InlineKeyboardButton(text="🎬 Buka NOBAR", web_app=WebAppInfo(url=f"{settings.webapp_url}/miniapp?room={room.code}"))],
+        [InlineKeyboardButton(text="🎞️ Pilih Film", callback_data=f"roomfilm:{room.id}"), InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"share:{room.id}")],
+        [InlineKeyboardButton(text="👥 Member", callback_data=f"roommembers:{room.id}"), InlineKeyboardButton(text="🚪 Keluar Room", callback_data=f"leave:{room.id}")],
     ])
 
 
 def safe_direct_room_menu(room):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎬 Buka NOBAR", callback_data=f"openroom:{room.id}")],
-        [InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"directshare:{room.id}")],
-        [InlineKeyboardButton(text="📤 Tambah Film", callback_data=f"roomupload:{room.id}")],
+        [InlineKeyboardButton(text="🎬 Buka NOBAR", web_app=WebAppInfo(url=f"{settings.webapp_url}/miniapp?room={room.code}"))],
+        [InlineKeyboardButton(text="🎞️ Pilih Film", callback_data=f"roomfilm:{room.id}"), InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"directshare:{room.id}")],
     ])
 
 
-# Patch existing builders without duplicating their complete handlers.py.
+def patched_main_menu(admin=False):
+    rows = [
+        [InlineKeyboardButton(text="🎬 Buat Room", callback_data="menu:create"), InlineKeyboardButton(text="🔗 Join Room", callback_data="menu:join")],
+        [InlineKeyboardButton(text="🔎 Cek NOBAR", callback_data="menu:rooms"), InlineKeyboardButton(text="📋 Info Room", callback_data="menu:info")],
+        [InlineKeyboardButton(text="📤 Tambah Film", callback_data="menu:upload"), InlineKeyboardButton(text="🎞️ Film Tersimpan", callback_data="menu:films")],
+        [InlineKeyboardButton(text="👤 Room Saya", callback_data="menu:myrooms"), InlineKeyboardButton(text="❓ Bantuan", callback_data="menu:help")],
+        [InlineKeyboardButton(text="💬 Feedback", callback_data="menu:feedback")],
+    ]
+    if admin:
+        rows.append([InlineKeyboardButton(text="🔐 Panel Admin", callback_data="admin:open")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 legacy.room_menu = safe_room_menu
+legacy.main_menu = patched_main_menu
 direct_room.room_keyboard = safe_direct_room_menu
 
 
@@ -80,7 +93,7 @@ async def create_room_direct(message: Message, bot):
     title = message.text.partition(" ")[2].strip() or "NOBAR"
     room = await tracked_create_direct_room(message.from_user.id, title)
     await message.answer(
-        f"🎬 <b>Room NOBAR dibuat!</b>\n\n🔑 Kode: <code>{room.code}</code>\n👑 Host: @{html.escape(message.from_user.username or str(message.from_user.id))}\n\nRoom ini tidak terikat ke grup. Tambahkan film lalu bagikan ke grup.",
+        f"🎬 <b>Room NOBAR dibuat!</b>\n\n🔑 Kode: <code>{room.code}</code>\n👑 Host: @{html.escape(message.from_user.username or str(message.from_user.id))}\n\nRoom ini tidak terikat ke grup. Pilih film tersimpan lalu bagikan ke grup.",
         reply_markup=safe_direct_room_menu(room),
     )
 
@@ -94,9 +107,107 @@ async def create_from_menu_direct(callback: CallbackQuery, bot):
     await legacy.ensure_user(callback.from_user)
     room = await tracked_create_direct_room(callback.from_user.id)
     await callback.message.answer(
-        f"🎬 <b>Room NOBAR dibuat!</b>\n\n🔑 Kode: <code>{room.code}</code>\n👑 Host: @{html.escape(callback.from_user.username or str(callback.from_user.id))}\n\nRoom siap digunakan. Tambahkan film lalu share ke grup.",
+        f"🎬 <b>Room NOBAR dibuat!</b>\n\n🔑 Kode: <code>{room.code}</code>\n👑 Host: @{html.escape(callback.from_user.username or str(callback.from_user.id))}\n\nRoom siap digunakan. Pilih film tersimpan lalu share ke grup.",
         reply_markup=safe_direct_room_menu(room),
     )
+
+
+@router.callback_query(lambda c: c.data == "menu:films")
+async def film_library(callback: CallbackQuery, bot):
+    if not await legacy.channel_access(bot, callback.from_user.id):
+        await callback.answer("Join channel owner dulu.", show_alert=True)
+        return
+    await callback.answer()
+    async with Session() as session:
+        films = (await session.scalars(select(Film).where(Film.status == "ready", Film.owner_user_id == callback.from_user.id).order_by(Film.created_at.desc()).limit(50))).all()
+    if not films:
+        await callback.message.answer("🎞️ <b>Film Tersimpan</b>\n\nBelum ada film tersimpan. Kirim video/film langsung ke bot untuk menyimpannya.")
+        return
+    lines = ["🎞️ <b>FILM TERSIMPAN</b>", "", "Pilih film untuk melihat detail atau memasukkannya ke room:"]
+    buttons = []
+    for film in films:
+        lines.append(f"• {html.escape(film.title)}")
+        buttons.append([InlineKeyboardButton(text=f"🎬 {film.title[:45]}", callback_data=f"filmview:{film.id}")])
+    await callback.message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("filmview:"))
+async def film_view(callback: CallbackQuery, bot):
+    await callback.answer()
+    fid = int(callback.data.split(":", 1)[1])
+    async with Session() as session:
+        film = await session.get(Film, fid)
+    if not film or film.status != "ready" or film.owner_user_id != callback.from_user.id:
+        await callback.message.answer("❌ Film tidak ditemukan.")
+        return
+    size = film.size_bytes / (1024 ** 3) if film.size_bytes >= 1024 ** 3 else film.size_bytes / (1024 ** 2)
+    unit = "GB" if film.size_bytes >= 1024 ** 3 else "MB"
+    await callback.message.answer(
+        f"🎞️ <b>{html.escape(film.title)}</b>\n\n📦 Ukuran: {size:.2f} {unit}\n🔐 SHA-256: <code>{html.escape(film.sha256 or '-')}</code>\n☁️ Backblaze B2\n\nFilm ini sudah tersimpan dan tidak perlu di-upload lagi.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎬 Pilih untuk Room", callback_data=f"filmpick:{film.id}")]]),
+    )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("roomfilm:"))
+async def room_film_picker(callback: CallbackQuery, bot):
+    await callback.answer()
+    rid = int(callback.data.split(":", 1)[1])
+    async with Session() as session:
+        room = await session.get(Room, rid)
+        films = (await session.scalars(select(Film).where(Film.status == "ready", Film.owner_user_id == callback.from_user.id).order_by(Film.created_at.desc()).limit(50))).all()
+    if not room or not room.is_active:
+        await callback.message.answer("❌ Room tidak aktif.")
+        return
+    if room.host_user_id != callback.from_user.id:
+        await callback.message.answer("❌ Hanya host yang dapat memilih film.")
+        return
+    if not films:
+        await callback.message.answer("🎞️ Belum ada film tersimpan. Kirim film langsung ke bot terlebih dahulu.")
+        return
+    buttons = [[InlineKeyboardButton(text=f"🎬 {film.title[:45]}", callback_data=f"filmpickroom:{rid}:{film.id}")] for film in films]
+    await callback.message.answer("🎞️ <b>PILIH FILM UNTUK ROOM</b>\n\nFilm diambil dari koleksi tersimpan. Tidak ada upload ulang.", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("filmpickroom:"))
+async def pick_film_for_room(callback: CallbackQuery, bot):
+    await callback.answer("Film dipilih")
+    _, rid, fid = callback.data.split(":")
+    rid, fid = int(rid), int(fid)
+    async with Session() as session:
+        room = await session.get(Room, rid)
+        film = await session.get(Film, fid)
+        if not room or not room.is_active:
+            await callback.message.answer("❌ Room tidak aktif.")
+            return
+        if room.host_user_id != callback.from_user.id:
+            await callback.message.answer("❌ Hanya host yang dapat memilih film.")
+            return
+        if not film or film.status != "ready" or film.owner_user_id != callback.from_user.id:
+            await callback.message.answer("❌ Film tidak tersedia.")
+            return
+        room.film_id = film.id
+        room.position = 0
+        room.is_playing = False
+        room.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+    await callback.message.answer(f"✅ <b>Film dipasang ke room</b>\n\n🎞️ {html.escape(film.title)}\n\nTidak ada upload ulang. Semua peserta akan memakai film yang sama dari penyimpanan.", reply_markup=safe_direct_room_menu(room) if room.group_chat_id is None else safe_room_menu(room))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("filmpick:"))
+async def pick_film_prompt(callback: CallbackQuery, bot):
+    await callback.answer()
+    fid = int(callback.data.split(":", 1)[1])
+    async with Session() as session:
+        film = await session.get(Film, fid)
+        rooms = (await session.scalars(select(Room).where(Room.host_user_id == callback.from_user.id, Room.is_active.is_(True)).order_by(Room.created_at.desc()).limit(20))).all()
+    if not film or film.owner_user_id != callback.from_user.id:
+        await callback.message.answer("❌ Film tidak ditemukan.")
+        return
+    if not rooms:
+        await callback.message.answer("🎬 Belum ada room aktif. Buat room dulu.")
+        return
+    buttons = [[InlineKeyboardButton(text=f"🍿 {r.title[:42]} · {r.code}", callback_data=f"filmpickroom:{r.id}:{film.id}")] for r in rooms]
+    await callback.message.answer("Pilih room tujuan untuk film ini:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("openroom:"))
@@ -118,7 +229,7 @@ async def open_room(callback: CallbackQuery, bot):
             f"🎬 <b>{html.escape(room.title)}</b>\n\n🔑 Room: <code>{room.code}</code>\n\nSiap nonton bareng.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🎬 Mulai Nonton", web_app=WebAppInfo(url=f"{settings.webapp_url}/miniapp?room={room.code}"))],
-                [InlineKeyboardButton(text="📤 Upload Film", callback_data=f"roomupload:{room.id}"), InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"directshare:{room.id}")],
+                [InlineKeyboardButton(text="🎞️ Pilih Film", callback_data=f"roomfilm:{room.id}"), InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"directshare:{room.id}")],
             ]),
         )
         return
@@ -127,8 +238,8 @@ async def open_room(callback: CallbackQuery, bot):
     if not me.username:
         await callback.answer("Bot belum memiliki username publik.", show_alert=True)
         return
-    deep_link = f"https://t.me/{me.username}?start=room_{room.code}"
-    await callback.answer(url=deep_link)
+    direct_link = f"https://t.me/{me.username}?startapp=room_{room.code}"
+    await callback.answer(url=direct_link)
 
 
 @router.message(lambda m: bool(m.text) and re.match(r"^/start(?:@[^\s]+)?\s+room_[A-Za-z0-9_-]+$", m.text.strip(), re.I))
@@ -151,7 +262,7 @@ async def join_from_deep_link(message: Message, bot):
         f"✅ <b>Berhasil masuk NOBAR</b>\n\n🎞️ {html.escape(room.title)}\n🔑 Room: <code>{room.code}</code>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🎬 Mulai Nonton", web_app=WebAppInfo(url=f"{settings.webapp_url}/miniapp?room={room.code}"))],
-            [InlineKeyboardButton(text="📤 Upload Film", callback_data=f"roomupload:{room.id}"), InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"directshare:{room.id}")],
+            [InlineKeyboardButton(text="🎞️ Pilih Film", callback_data=f"roomfilm:{room.id}")],
         ]),
     )
 
