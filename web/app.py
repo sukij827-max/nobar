@@ -1,1 +1,1 @@
-from web.api import app
+from web.core import app
