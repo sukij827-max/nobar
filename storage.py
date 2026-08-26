@@ -53,3 +53,18 @@ def head(key: str) -> dict:
 
 def delete_object(key: str) -> None:
     s3.delete_object(Bucket=settings.b2_bucket, Key=key)
+
+
+def upload_file(path: str, key: str, mime: str, sha256: str) -> None:
+    s3.upload_file(
+        path,
+        settings.b2_bucket,
+        key,
+        ExtraArgs={"ContentType": mime, "Metadata": {"nobar": "1", "sha256": sha256}},
+        Config=boto3.s3.transfer.TransferConfig(
+            multipart_threshold=64 * 1024 * 1024,
+            multipart_chunksize=64 * 1024 * 1024,
+            max_concurrency=4,
+            use_threads=True,
+        ),
+    )
