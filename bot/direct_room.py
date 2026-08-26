@@ -3,12 +3,11 @@ import secrets
 import string
 from datetime import datetime, timezone
 
-from aiogram import Bot, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 
-from config import settings
 from db import GroupMember, Member, Room, Session
 
 router = Router()
@@ -48,13 +47,8 @@ async def create_direct_room(user_id: int, title: str = "NOBAR") -> Room:
         return room
 
 
-@router.message(Command("nobar"), flags={"direct_room": True})
+@router.message(Command("nobar"), F.chat.type == "private")
 async def nobar_command(message: Message, bot: Bot):
-    # This handler is intentionally registered before the legacy group-only
-    # handler. A private-chat /nobar now creates a room immediately; in a group
-    # the existing group-scoped handler remains responsible for /nobar.
-    if message.chat.type in {"group", "supergroup"}:
-        return
     room = await create_direct_room(message.from_user.id, message.text.partition(" ")[2].strip() or "NOBAR")
     await message.answer(
         f"🎬 <b>Room NOBAR dibuat!</b>\n\n🔑 Kode: <code>{room.code}</code>\n👑 Host: @{html.escape(message.from_user.username or str(message.from_user.id))}\n\nSekarang tambahkan film, lalu share room ke grup.",
