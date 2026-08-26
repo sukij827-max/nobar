@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from aiogram import Bot, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from config import settings
 from db import Feedback, Member, Room, Session, User
@@ -38,9 +38,20 @@ async def channel_access(bot: Bot, user_id: int) -> bool:
 
 async def ensure_user(user) -> None:
     async with Session() as session:
-        row = await session.get(User, user.id)
         now = datetime.now(timezone.utc)
-        if not row:
+
+        # The production database contains legacy rows where the Telegram ID
+        # is stored in telegram_id while user_id was an old numeric PK. Never
+        # INSERT a second row just because the immutable Telegram ID is not
+        # equal to that legacy PK.
+        result = await session.execute(
+            select(User)
+            .where(or_(User.user_id == user.id, User.telegram_id == user.id))
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+
+        if row is None:
             session.add(
                 User(
                     user_id=user.id,
@@ -52,13 +63,12 @@ async def ensure_user(user) -> None:
                 )
             )
         else:
-            # user_id is the immutable application identity. telegram_id is
-            # retained only as a backwards-compatible DB alias.
             row.telegram_id = user.id
             row.username = user.username
             row.first_name = user.first_name
             row.updated_at = now
             row.last_seen = now
+
         await session.commit()
 
 
@@ -98,38 +108,32 @@ async def help_command(message: Message, bot: Bot):
         "/nobar [judul] — buat room di GC\n"
         "/join KODE — gabung room\n"
         "/rooms — lihat semua room aktif\n"
-        "/room KODE — status\n"
+        "/room KODE — detail room\n"
         "/play KODE — buka player\n"
-        "/upload KODE — uploader host\n"
-        "/feedback teks — kirim feedback\n"
-        "/broadcast — owner: reply pesan untuk broadcast"
+        "/upload KODE — upload film\n"
+        "/feedback — kirim feedback"
     )
 
 
 @router.message(Command("nobar"))
 async def create_room(message: Message, bot: Bot):
-    if message.chat.type not in {"group", "supergroup"}:
-        return await message.answer("Gunakan /nobar di group Telegram.")
     if not await require_channel(message, bot):
         return
+    if message.chat.type not in {"group", "supergroup"}:
+        await message.answer("❌ /nobar hanya bisa dipakai di grup.")
+        return
     await ensure_user(message.from_user)
-    title = (message.text.partition(" ")[2].strip() or f"Nobar {message.from_user.first_name}")[:200]
+    title = message.text.partition(" ")[2].strip() or "NOBAR"
     async with Session() as session:
-        for _ in range(10):
+        code = make_code()
+        while (await session.scalar(select(Room.id).where(Room.code == code))) is not None:
             code = make_code()
-            exists = await session.scalar(select(Room.id).where(Room.code == code))
-            if not exists:
-                break
-        else:
-            return await message.answer("❌ Gagal membuat kode room. Coba lagi.")
-        room = Room(code=code, group_chat_id=message.chat.id, host_user_id=message.from_user.id, title=title)
+        room = Room(code=code, title=title, group_id=message.chat.id, host_id=message.from_user.id)
         session.add(room)
-        await session.flush()
-        session.add(Member(room_id=room.id, user_id=message.from_user.id))
+        session.add(Member(room=room, user_id=message.from_user.id))
         await session.commit()
-        await session.refresh(room)
     await message.answer(
-        f"🍿 <b>Room NOBAR dibuat</b>\n\n🎬 {html.escape(title)}\n🔑 Kode: <code>{room.code}</code>\n\nHost bisa upload film dari tombol di bawah.",
+        f"🍿 <b>{html.escape(title)}</b>\n\nRoom: <code>{code}</code>\nHost: @{html.escape(message.from_user.username or str(message.from_user.id))}",
         reply_markup=room_button(room, upload=True),
     )
 
@@ -140,80 +144,94 @@ async def join_room(message: Message, bot: Bot):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
-        return await message.answer("Gunakan /join KODE")
+        await message.answer("Gunakan: /join KODE")
+        return
+    code = parts[1].strip().upper()
     await ensure_user(message.from_user)
     async with Session() as session:
-        room = await session.scalar(select(Room).where(Room.code == parts[1].strip().upper(), Room.is_active.is_(True)))
+        room = await session.scalar(select(Room).where(Room.code == code, Room.is_active.is_(True)))
         if not room:
-            return await message.answer("❌ Room tidak ditemukan atau sudah ditutup.")
-        if message.chat.id != room.group_chat_id:
-            return await message.answer("❌ Room ini berasal dari GC lain.")
-        member = await session.scalar(select(Member.id).where(Member.room_id == room.id, Member.user_id == message.from_user.id))
-        if not member:
+            await message.answer("❌ Room tidak ditemukan atau sudah ditutup.")
+            return
+        exists = await session.scalar(select(Member.id).where(Member.room_id == room.id, Member.user_id == message.from_user.id))
+        if not exists:
             session.add(Member(room_id=room.id, user_id=message.from_user.id))
             await session.commit()
-    await message.answer(f"✅ Kamu masuk ke <b>{html.escape(room.title)}</b>.", reply_markup=room_button(room))
+    await message.answer(f"✅ Kamu masuk room <code>{code}</code>.", reply_markup=room_button(room))
 
 
 @router.message(Command("rooms"))
 async def list_rooms(message: Message, bot: Bot):
-    if message.chat.type not in {"group", "supergroup"}:
-        return await message.answer("Gunakan /rooms di group Telegram.")
     if not await require_channel(message, bot):
         return
     async with Session() as session:
-        rooms = (await session.scalars(select(Room).where(Room.group_chat_id == message.chat.id, Room.is_active.is_(True)).order_by(Room.created_at.desc()).limit(20))).all()
+        rooms = (await session.scalars(select(Room).where(Room.is_active.is_(True)).order_by(Room.created_at.desc()).limit(20))).all()
     if not rooms:
-        return await message.answer("📭 Belum ada room aktif di GC ini.")
+        await message.answer("Belum ada room aktif.")
+        return
     lines = ["🎬 <b>Room aktif</b>"]
     for room in rooms:
         lines.append(f"• <code>{room.code}</code> — {html.escape(room.title)}")
-    await message.answer("\n".join(lines), reply_markup=dashboard_button(message.chat.id))
+    await message.answer("\n".join(lines))
 
 
-async def open_room(message: Message, bot: Bot, command: str, upload: bool = False):
+@router.message(Command("room"))
+async def room_info(message: Message, bot: Bot):
     if not await require_channel(message, bot):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
-        return await message.answer(f"Gunakan /{command} KODE")
+        await message.answer("Gunakan: /room KODE")
+        return
     async with Session() as session:
-        room = await session.scalar(select(Room).where(Room.code == parts[1].strip().upper(), Room.is_active.is_(True)))
-    if not room:
-        return await message.answer("❌ Room tidak ditemukan.")
-    if message.chat.id != room.group_chat_id:
-        return await message.answer("❌ Room ini bukan milik GC ini.")
-    if upload and message.from_user.id != room.host_user_id:
-        return await message.answer("❌ Hanya host room yang boleh upload film.")
-    await message.answer("🎬 Buka Mini App NOBAR:", reply_markup=room_button(room, upload))
+        room = await session.scalar(select(Room).where(Room.code == parts[1].strip().upper()))
+        if not room:
+            await message.answer("❌ Room tidak ditemukan.")
+            return
+        count = await session.scalar(select(func.count(Member.id)).where(Member.room_id == room.id))
+    await message.answer(
+        f"🎬 <b>{html.escape(room.title)}</b>\n\n"
+        f"Kode: <code>{room.code}</code>\n"
+        f"Member: {count}\n"
+        f"Status: {'🟢 aktif' if room.is_active else '🔴 ditutup'}",
+        reply_markup=room_button(room),
+    )
 
 
 @router.message(Command("play"))
 async def play_room(message: Message, bot: Bot):
-    await open_room(message, bot, "play")
-
-
-@router.message(Command("upload"))
-async def upload_room(message: Message, bot: Bot):
-    await open_room(message, bot, "upload", True)
-
-
-@router.message(Command("room"))
-async def room_status(message: Message, bot: Bot):
     if not await require_channel(message, bot):
         return
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
-        return await message.answer("Gunakan /room KODE")
+        await message.answer("Gunakan: /play KODE")
+        return
     async with Session() as session:
-        room = await session.scalar(select(Room).where(Room.code == parts[1].strip().upper()))
-        if not room:
-            return await message.answer("❌ Room tidak ditemukan.")
-        if room.group_chat_id != message.chat.id:
-            return await message.answer("❌ Room ini bukan milik GC ini.")
-        count = await session.scalar(select(func.count()).select_from(Member).where(Member.room_id == room.id))
-    state = "▶️ Playing" if room.is_playing else "⏸️ Paused"
-    await message.answer(f"🎬 <b>{html.escape(room.title)}</b>\n🔑 <code>{room.code}</code>\n👥 {count} peserta\n{state}\n⏱️ {int(room.position)} detik")
+        room = await session.scalar(select(Room).where(Room.code == parts[1].strip().upper(), Room.is_active.is_(True)))
+    if not room:
+        await message.answer("❌ Room tidak ditemukan.")
+        return
+    await message.answer("▶️ Buka player NOBAR:", reply_markup=room_button(room))
+
+
+@router.message(Command("upload"))
+async def upload_room(message: Message, bot: Bot):
+    if not await require_channel(message, bot):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.answer("Gunakan: /upload KODE")
+        return
+    await ensure_user(message.from_user)
+    async with Session() as session:
+        room = await session.scalar(select(Room).where(Room.code == parts[1].strip().upper(), Room.is_active.is_(True)))
+    if not room:
+        await message.answer("❌ Room tidak ditemukan.")
+        return
+    if room.host_id != message.from_user.id:
+        await message.answer("❌ Hanya host yang dapat mengupload film.")
+        return
+    await message.answer("📤 Buka NOBAR untuk upload film langsung ke B2.", reply_markup=room_button(room, upload=True))
 
 
 @router.message(Command("feedback"))
@@ -222,32 +240,10 @@ async def feedback(message: Message, bot: Bot):
         return
     text = message.text.partition(" ")[2].strip()
     if not text:
-        return await message.answer("Gunakan /feedback lalu tulis masukan/bug kamu.")
+        await message.answer("Gunakan: /feedback isi masukan")
+        return
+    await ensure_user(message.from_user)
     async with Session() as session:
-        session.add(Feedback(user_id=message.from_user.id, username=message.from_user.username, kind="feedback", message=text[:4000]))
+        session.add(Feedback(user_id=message.from_user.id, username=message.from_user.username, message=text))
         await session.commit()
-    await message.answer("✅ Feedback tersimpan. Makasih sudah bantu ngembangin NOBAR!")
-    try:
-        uname = f"@{message.from_user.username}" if message.from_user.username else str(message.from_user.id)
-        await bot.send_message(settings.owner_id, f"📝 <b>Feedback NOBAR</b>\n👤 {html.escape(uname)}\n🆔 <code>{message.from_user.id}</code>\n\n{html.escape(text[:3500])}")
-    except Exception:
-        pass
-
-
-@router.message(Command("broadcast"))
-async def broadcast(message: Message, bot: Bot):
-    if message.from_user.id != settings.owner_id:
-        return await message.answer("❌ Owner only.")
-    if not message.reply_to_message:
-        return await message.answer("Reply pesan yang mau dibroadcast lalu kirim /broadcast")
-    async with Session() as session:
-        ids = [x[0] for x in (await session.execute(select(User.user_id))).all()]
-    sent = 0
-    failed = 0
-    for uid in ids:
-        try:
-            await bot.copy_message(uid, message.chat.id, message.reply_to_message.message_id)
-            sent += 1
-        except Exception:
-            failed += 1
-    await message.answer(f"📢 Broadcast selesai.\n✅ Terkirim: {sent}\n⚠️ Gagal: {failed}")
+    await message.answer("✅ Feedback sudah diterima. Terima kasih!")
