@@ -39,8 +39,8 @@ def webhook_url() -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup is deliberately fail-fast: a green web server with a dead Telegram
-    # webhook is not considered a healthy NOBAR deployment.
+    # Keep one webhook for the lifetime of this service. Do not remove it on
+    # shutdown: Telegram should continue pointing at NOBAR across restarts.
     await init_db()
     try:
         me = await bot.get_me()
@@ -48,8 +48,6 @@ async def lifespan(app: FastAPI):
         if not url.startswith("https://"):
             raise RuntimeError("WEBAPP_URL must be HTTPS for Telegram webhook")
 
-        # Remove any stale webhook first, then install exactly one known webhook.
-        await bot.delete_webhook(drop_pending_updates=False)
         await bot.set_webhook(
             url=url,
             secret_token=webhook_secret(),
@@ -64,17 +62,21 @@ async def lifespan(app: FastAPI):
         info = await bot.get_webhook_info()
         if info.url != url:
             raise RuntimeError(f"Telegram webhook mismatch: {info.url!r} != {url!r}")
-        log.info("NOBAR Telegram ready: bot=@%s webhook=%s", me.username, url)
+        log.info(
+            "NOBAR Telegram ready: bot=@%s webhook=%s pending=%s last_error=%r",
+            me.username, url, info.pending_update_count, info.last_error_message,
+        )
         yield
     except Exception:
         log.exception("NOBAR startup failed while configuring Telegram webhook")
         await close_db()
         raise
     finally:
+        # IMPORTANT: do not call delete_webhook() here. A Railway restart must
+        # not unregister the Telegram webhook. Only close local resources.
         try:
-            await bot.delete_webhook(drop_pending_updates=False)
-        finally:
             await bot.session.close()
+        finally:
             await close_db()
 
 
@@ -108,6 +110,7 @@ async def health():
         "service": "nobar",
         "telegram": {
             "webhook_url_configured": info.url == webhook_url(),
+            "webhook_url": info.url,
             "pending_updates": info.pending_update_count,
             "last_error": info.last_error_message,
             "last_error_date": info.last_error_date,
@@ -164,25 +167,11 @@ async def dashboard(group_id: int, init_data: str = ""):
         )
         if allowed is None:
             raise HTTPException(403, "Akses dashboard GC ditolak")
-        rooms = (
-            await session.scalars(
-                select(Room)
-                .where(Room.group_chat_id == group_id, Room.is_active.is_(True))
-                .order_by(Room.created_at.desc())
-                .limit(30)
-            )
-        ).all()
+        rooms = (await session.scalars(select(Room).where(Room.group_chat_id == group_id, Room.is_active.is_(True)).order_by(Room.created_at.desc()).limit(30))).all()
         result = []
         for room in rooms:
             members = await session.scalar(select(func.count()).select_from(Member).where(Member.room_id == room.id))
-            result.append({
-                "code": room.code,
-                "title": room.title,
-                "host_id": room.host_user_id,
-                "members": members,
-                "playing": room.is_playing,
-                "position": room.position,
-            })
+            result.append({"code": room.code, "title": room.title, "host_id": room.host_user_id, "members": members, "playing": room.is_playing, "position": room.position})
     return {"group_id": group_id, "rooms": result}
 
 
@@ -198,28 +187,8 @@ async def room_api(code: str, init_data: str = ""):
         if not member:
             raise HTTPException(403, "Join room terlebih dahulu")
         members = await session.scalar(select(func.count()).select_from(Member).where(Member.room_id == room.id))
-        film = await session.scalar(
-            select(Film).where(Film.room_id == room.id, Film.status == "ready").order_by(Film.created_at.desc())
-        )
-    return {
-        "room": {
-            "code": room.code,
-            "title": room.title,
-            "group_id": room.group_chat_id,
-            "host_id": room.host_user_id,
-            "is_host": uid == room.host_user_id,
-            "playing": room.is_playing,
-            "position": room.position,
-            "updated_at": room.updated_at.isoformat(),
-        },
-        "members": members,
-        "film": ({
-            "title": film.title,
-            "size": film.size_bytes,
-            "mime": film.mime_type,
-            "url": presigned_get(film.object_key),
-        } if film else None),
-    }
+        film = await session.scalar(select(Film).where(Film.room_id == room.id, Film.status == "ready").order_by(Film.created_at.desc()))
+    return {"room": {"code": room.code, "title": room.title, "group_id": room.group_chat_id, "host_id": room.host_user_id, "is_host": uid == room.host_user_id, "playing": room.is_playing, "position": room.position, "updated_at": room.updated_at.isoformat()}, "members": members, "film": ({"title": film.title, "size": film.size_bytes, "mime": film.mime_type, "url": presigned_get(film.object_key)} if film else None)}
 
 
 class SyncIn(BaseModel):
@@ -257,13 +226,6 @@ async def upload(code: str, payload: UploadIn):
         raise HTTPException(403, "Host only")
     key = f"films/{room.group_chat_id}/{room.code}/{secrets.token_hex(12)}-{payload.title.replace('/', '_')}"
     async with Session() as session:
-        session.add(Film(
-            room_id=room.id,
-            owner_user_id=room.host_user_id,
-            title=payload.title,
-            object_key=key,
-            size_bytes=payload.size,
-            mime_type=payload.mime,
-        ))
+        session.add(Film(room_id=room.id, owner_user_id=room.host_user_id, title=payload.title, object_key=key, size_bytes=payload.size, mime_type=payload.mime))
         await session.commit()
     return {"upload_url": presigned_put(key, payload.mime), "object_key": key}
