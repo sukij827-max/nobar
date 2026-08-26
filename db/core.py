@@ -46,7 +46,8 @@ class Room(Base):
     __tablename__ = "rooms"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     code: Mapped[str] = mapped_column(String(12), unique=True, index=True)
-    group_chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    # A room can be created in private chat first and shared to a group later.
+    group_chat_id: Mapped[int | None] = mapped_column(BigInteger, index=True, nullable=True)
     host_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     title: Mapped[str] = mapped_column(String(200))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -130,6 +131,8 @@ async def init_db() -> None:
             "UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE last_seen IS NULL",
             "ALTER TABLE users ALTER COLUMN last_seen SET DEFAULT CURRENT_TIMESTAMP",
             "ALTER TABLE users ALTER COLUMN last_seen SET NOT NULL",
+            "ALTER TABLE rooms ADD COLUMN IF NOT EXISTS group_chat_id BIGINT",
+            "ALTER TABLE rooms ALTER COLUMN group_chat_id DROP NOT NULL",
             "ALTER TABLE films ADD COLUMN IF NOT EXISTS sha256 VARCHAR(64)",
             "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS kind VARCHAR(30) DEFAULT 'feedback'",
         ]
