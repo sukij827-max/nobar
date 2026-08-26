@@ -7,9 +7,9 @@ from aiogram.enums import ParseMode
 
 from config import settings
 from bot.ui_patch import router as ui_router
+from bot.film_library import router as film_library_router
 from bot.fixes import router as fixes_router
 from bot.direct_room import router as direct_room_router
-from bot.film_library import router as film_library_router
 from bot.handlers import router
 
 log = logging.getLogger("nobar.telegram")
@@ -19,11 +19,12 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
-# UI guard comes first: group commands/menus are private-only, temporary
-# controls are cleaned up, and group invitations use startapp Mini App links.
+# UI guard comes first: group commands/menus are private-only and temporary
+# controls are cleaned up. Film library comes before the compatibility/fixes
+# router so its menu:films handler (including delete) is the authoritative one.
 dp.include_router(ui_router)
-dp.include_router(fixes_router)
 dp.include_router(film_library_router)
+dp.include_router(fixes_router)
 dp.include_router(direct_room_router)
 dp.include_router(router)
 
