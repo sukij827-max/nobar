@@ -48,6 +48,7 @@ async def ensure_user(user) -> None:
                     username=user.username,
                     first_name=user.first_name,
                     updated_at=now,
+                    last_seen=now,
                 )
             )
         else:
@@ -57,6 +58,7 @@ async def ensure_user(user) -> None:
             row.username = user.username
             row.first_name = user.first_name
             row.updated_at = now
+            row.last_seen = now
         await session.commit()
 
 

@@ -21,6 +21,7 @@ class User(Base):
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class Room(Base):
@@ -111,6 +112,11 @@ async def init_db() -> None:
         await conn.execute(text("UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP"))
         await conn.execute(text("ALTER TABLE users ALTER COLUMN updated_at SET NOT NULL"))
+
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"))
+        await conn.execute(text("UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE last_seen IS NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN last_seen SET DEFAULT CURRENT_TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN last_seen SET NOT NULL"))
 
 
 async def close_db() -> None:
