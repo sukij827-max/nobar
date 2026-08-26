@@ -1,37 +1,64 @@
-# Nobar Telegram — 5 GiB production layout
+# NOBAR Telegram
 
-Arsitektur final memakai **Telegram Bot + Telegram Mini App + PostgreSQL + Backblaze B2**.
+Arsitektur: **Telegram Bot + Telegram Mini App + PostgreSQL + Backblaze B2**.
 
-## Penyimpanan film
-Film **tidak disimpan di GitHub** dan tidak ditampung di Railway. GitHub hanya menyimpan source code. Film dikirim langsung dari browser Mini App ke Backblaze B2 memakai S3-compatible multipart upload.
+## Alur film
+Film **di-upload melalui Telegram Bot**, bukan melalui Mini App. Setelah berhasil disimpan ke Backblaze B2, metadata film disimpan di PostgreSQL sebagai **Film Tersimpan**.
 
-## Batas upload
-Film maksimal **5 GiB** per object. Upload memakai multipart upload dengan part 64 MiB dan 4 worker paralel di browser.
+Film yang sudah tersimpan tidak perlu di-upload ulang. Host cukup membuka **🎞️ Film Tersimpan**, memilih film, lalu memasangnya ke room NOBAR.
 
-## Alur
-1. `/nobar` membuat room.
-2. Host membuka Mini App.
-3. Host memilih video maksimal 5 GiB.
-4. Backend membuat multipart upload dan presigned URL.
-5. Browser mengirim part langsung ke B2 — Railway tidak menampung file 5 GiB.
-6. Backend memverifikasi seluruh part dan ukuran object lalu memasang film ke room.
-7. Mini App memakai presigned GET URL B2 untuk streaming dan seek.
-8. Host mengontrol play/pause/seek; penonton melakukan sinkronisasi otomatis.
+GitHub hanya menyimpan source code dan Railway tidak dipakai sebagai penyimpanan permanen film.
+
+## Alur NOBAR
+1. Host membuat room.
+2. Host memilih film dari **Film Tersimpan**.
+3. Host menekan **Share ke Grup**.
+4. Bot mengirim tombol **🎬 GABUNG NOBAR** menggunakan Telegram Mini App direct link (`startapp`).
+5. Saat tombol ditekan, Telegram langsung membuka Mini App — tidak diarahkan ke `/start` terlebih dahulu.
+6. Mini App otomatis mendaftarkan viewer ke room.
+7. Mini App mengambil film yang sudah tersimpan di B2 melalui presigned GET URL.
+8. Host mengontrol play/pause/seek dan peserta melakukan sinkronisasi otomatis.
+
+## Mini App
+Mini App dibuat sederhana untuk tahap awal dan fokus pada fitur inti:
+- Player video
+- Judul dan informasi room
+- Jumlah member
+- Status play/pause
+- Kontrol host
+- Sinkronisasi posisi dan status pemutaran
+- Streaming langsung dari Backblaze B2
+
+**Tidak ada uploader film di Mini App.**
+
+## Menu Bot
+- 🎬 Buat Room
+- 🔗 Join Room
+- 🔎 Cek NOBAR
+- 📋 Info Room
+- 📤 Tambah Film
+- 🎞️ Film Tersimpan
+- 👤 Room Saya
+- ❓ Bantuan
+- 💬 Feedback
+- 🔐 Panel Admin
 
 ## Command
-- `/nobar` — membuat room di grup.
+- `/nobar` — membuat room.
 - `/join KODE` — masuk room.
 - `/room KODE` — melihat status room.
-- `/play KODE` — membuka Mini App.
-- `/upload KODE` — membuka uploader khusus host.
-- `/rooms` — melihat room aktif di grup.
-- `/broadcast` — owner mengirim broadcast dengan reply pesan.
+- `/play KODE` — membuka player NOBAR.
+- `/upload` — petunjuk upload film melalui bot.
+- `/rooms` — melihat room aktif.
+- `/invite` — petunjuk share room.
+- `/feedback` — mengirim feedback.
 
-`/addfilm` tidak lagi mengunduh film melalui Telegram Bot API. Film besar harus memakai Mini App supaya file tidak melewati Railway.
+## Penyimpanan
+Film disimpan sebagai object di Backblaze B2. PostgreSQL menyimpan metadata film, termasuk judul, ukuran, MIME type, SHA-256, owner, dan object key.
+
+Satu film tersimpan dapat dipakai kembali untuk banyak room melalui `rooms.film_id`, sehingga tidak terjadi upload ulang hanya karena membuat room baru.
 
 ## Environment Railway
-Isi:
-
 - `BOT_TOKEN`
 - `DATABASE_URL`
 - `OWNER_ID`
@@ -41,28 +68,8 @@ Isi:
 - `B2_BUCKET`
 - `B2_KEY_ID`
 - `B2_APPLICATION_KEY`
-- `B2_REGION` — contoh `us-east-005`; sesuaikan dengan region endpoint bucket B2 kamu.
-- `PORT` — Railway biasanya mengisi sendiri.
+- `B2_REGION`
+- `PORT`
 
 ## Backblaze B2
-Buat bucket private dan application key yang mempunyai izin object yang diperlukan. Endpoint S3 B2 berbentuk `https://s3.<region>.backblazeb2.com` dan region harus sesuai dengan endpoint bucket. B2 S3-compatible API menggunakan AWS Signature V4.
-
-Atur CORS bucket agar domain Mini App boleh melakukan `PUT` dan membaca header `ETag`. Contoh:
-
-```json
-[
-  {
-    "AllowedOrigins": ["https://DOMAIN-MINI-APP-KAMU"],
-    "AllowedMethods": ["PUT", "GET", "HEAD"],
-    "AllowedHeaders": ["Content-Type", "*"],
-    "ExposeHeaders": ["ETag"],
-    "MaxAgeSeconds": 3600
-  }
-]
-```
-
-## Database
-`schema.sql` melakukan migrasi idempotent untuk tabel yang dipakai bot. Film upload sekarang memiliki `room_id` sehingga upload gagal/ulang pada satu room tidak mencampur upload room lain.
-
-## Streaming
-Film tidak diekstrak ke `/tmp`, tidak di-zip ulang, dan tidak di-download ke Railway. B2 mengirim object langsung ke browser melalui presigned URL.
+Gunakan bucket private dan application key dengan izin object yang diperlukan. Mini App hanya menerima presigned GET URL untuk streaming film.
