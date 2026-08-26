@@ -70,13 +70,14 @@ class Film(Base):
     __tablename__ = "films"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     room_id: Mapped[int] = mapped_column(Integer, index=True, default=0)
-    owner_user_id: Mapped[int] = mapped_column(BigInteger)
+    owner_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     title: Mapped[str] = mapped_column(String(255))
     object_key: Mapped[str] = mapped_column(String(700), unique=True)
     sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     mime_type: Mapped[str] = mapped_column(String(120), default="video/mp4")
     status: Mapped[str] = mapped_column(String(20), default="ready")
+    library_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -135,11 +136,16 @@ async def init_db() -> None:
             "ALTER TABLE rooms ALTER COLUMN group_chat_id DROP NOT NULL",
             "ALTER TABLE rooms ADD COLUMN IF NOT EXISTS film_id INTEGER",
             "ALTER TABLE films ADD COLUMN IF NOT EXISTS sha256 VARCHAR(64)",
+            "ALTER TABLE films ADD COLUMN IF NOT EXISTS library_deleted BOOLEAN DEFAULT FALSE",
+            "UPDATE films SET library_deleted = FALSE WHERE library_deleted IS NULL",
+            "ALTER TABLE films ALTER COLUMN library_deleted SET DEFAULT FALSE",
+            "ALTER TABLE films ALTER COLUMN library_deleted SET NOT NULL",
             "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS kind VARCHAR(30) DEFAULT 'feedback'",
         ]
         for statement in statements:
             await conn.execute(text(statement))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_films_sha256 ON films (sha256)"))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_films_owner_library ON films (owner_user_id, library_deleted, created_at DESC)"))
         await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rooms_film_id ON rooms (film_id)"))
 
 
