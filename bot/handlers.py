@@ -41,8 +41,19 @@ async def ensure_user(user) -> None:
         row = await session.get(User, user.id)
         now = datetime.now(timezone.utc)
         if not row:
-            session.add(User(user_id=user.id, username=user.username, first_name=user.first_name, updated_at=now))
+            session.add(
+                User(
+                    user_id=user.id,
+                    telegram_id=user.id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    updated_at=now,
+                )
+            )
         else:
+            # user_id is the immutable application identity. telegram_id is
+            # retained only as a backwards-compatible DB alias.
+            row.telegram_id = user.id
             row.username = user.username
             row.first_name = user.first_name
             row.updated_at = now
@@ -85,7 +96,7 @@ async def help_command(message: Message, bot: Bot):
         "/nobar [judul] — buat room di GC\n"
         "/join KODE — gabung room\n"
         "/rooms — lihat semua room aktif\n"
-        "/room KODE — status room\n"
+        "/room KODE — status\n"
         "/play KODE — buka player\n"
         "/upload KODE — uploader host\n"
         "/feedback teks — kirim feedback\n"
