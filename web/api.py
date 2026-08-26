@@ -1,86 +1,269 @@
-import hashlib,hmac,json,time,secrets,logging
-from urllib.parse import parse_qsl
+import hashlib
+import hmac
+import json
+import logging
+import secrets
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI,HTTPException,Request
+from urllib.parse import parse_qsl
+
+from aiogram.types import Update
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from aiogram.types import Update
-from pydantic import BaseModel,Field
-from sqlalchemy import select,func
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+
+from bot.runtime import bot, dp
 from config import settings
-from db import Session,Room,Member,Film,init_db,close_db
-from storage import presigned_put,presigned_get
-from bot.runtime import bot,dp
-log=logging.getLogger(__name__)
-app=FastAPI(title='NOBAR Mini App',docs_url=None,redoc_url=None);STATIC=Path(__file__).parent/'static';app.mount('/static',StaticFiles(directory=STATIC),name='static')
-def user(init):
+from db import Film, Member, Room, Session, close_db, init_db
+from storage import presigned_get, presigned_put
+
+log = logging.getLogger("nobar")
+STATIC = Path(__file__).parent / "static"
+WEBHOOK_PATH = "/telegram/webhook"
+
+
+def webhook_secret() -> str:
+    return hmac.new(
+        settings.bot_token.encode(),
+        settings.webapp_url.encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+
+def webhook_url() -> str:
+    return f"{settings.webapp_url}{WEBHOOK_PATH}"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup is deliberately fail-fast: a green web server with a dead Telegram
+    # webhook is not considered a healthy NOBAR deployment.
+    await init_db()
     try:
-        p=dict(parse_qsl(init,keep_blank_values=True));h=p.pop('hash',None);auth=int(p.get('auth_date','0'))
-        if not h or not auth or auth>time.time()+60 or time.time()-auth>86400:return None
-        check='\n'.join(f'{k}={v}' for k,v in sorted(p.items()));secret=hmac.new(b'WebAppData',settings.bot_token.encode(),hashlib.sha256).digest();exp=hmac.new(secret,check.encode(),hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(exp,h):return None
-        return json.loads(p.get('user','{}'))
-    except Exception:return None
-@app.on_event('startup')
-async def startup():
-    await init_db();webhook=f'{settings.webapp_url.rstrip("/")}/telegram/webhook';secret=hmac.new(settings.bot_token.encode(),settings.webapp_url.encode(),hashlib.sha256).hexdigest()[:32];await bot.get_me();await bot.set_webhook(webhook,secret_token=secret,drop_pending_updates=False,allowed_updates=['message','callback_query','chat_member','my_chat_member'])
-@app.on_event('shutdown')
-async def shutdown():
-    try:await bot.delete_webhook(drop_pending_updates=False);await bot.session.close()
-    finally:await close_db()
-@app.get('/health')
-async def health():return {'status':'ok','service':'nobar','version':'1.2'}
-@app.post('/telegram/webhook')
-async def telegram_webhook(request:Request):
-    secret=request.headers.get('X-Telegram-Bot-Api-Secret-Token');expected=hmac.new(settings.bot_token.encode(),settings.webapp_url.encode(),hashlib.sha256).hexdigest()[:32]
-    if not secret or not hmac.compare_digest(secret,expected):raise HTTPException(403,'Invalid webhook secret')
+        me = await bot.get_me()
+        url = webhook_url()
+        if not url.startswith("https://"):
+            raise RuntimeError("WEBAPP_URL must be HTTPS for Telegram webhook")
+
+        # Remove any stale webhook first, then install exactly one known webhook.
+        await bot.delete_webhook(drop_pending_updates=False)
+        await bot.set_webhook(
+            url=url,
+            secret_token=webhook_secret(),
+            drop_pending_updates=False,
+            allowed_updates=[
+                "message",
+                "callback_query",
+                "chat_member",
+                "my_chat_member",
+            ],
+        )
+        info = await bot.get_webhook_info()
+        if info.url != url:
+            raise RuntimeError(f"Telegram webhook mismatch: {info.url!r} != {url!r}")
+        log.info("NOBAR Telegram ready: bot=@%s webhook=%s", me.username, url)
+        yield
+    except Exception:
+        log.exception("NOBAR startup failed while configuring Telegram webhook")
+        await close_db()
+        raise
+    finally:
+        try:
+            await bot.delete_webhook(drop_pending_updates=False)
+        finally:
+            await bot.session.close()
+            await close_db()
+
+
+app = FastAPI(title="NOBAR Mini App", docs_url=None, redoc_url=None, lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+def telegram_user(init_data: str):
     try:
-        payload=await request.json();update=Update.model_validate(payload);await dp.feed_update(bot,update);return {'ok':True}
+        data = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = data.pop("hash", None)
+        auth_date = int(data.get("auth_date", "0"))
+        now = int(time.time())
+        if not received_hash or not auth_date or auth_date > now + 60 or now - auth_date > 86400:
+            return None
+        check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+        secret = hmac.new(b"WebAppData", settings.bot_token.encode(), hashlib.sha256).digest()
+        expected = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, received_hash):
+            return None
+        return json.loads(data.get("user", "{}"))
+    except Exception:
+        return None
+
+
+@app.get("/health")
+async def health():
+    info = await bot.get_webhook_info()
+    return {
+        "status": "ok",
+        "service": "nobar",
+        "telegram": {
+            "webhook_url_configured": info.url == webhook_url(),
+            "pending_updates": info.pending_update_count,
+            "last_error": info.last_error_message,
+            "last_error_date": info.last_error_date,
+        },
+    }
+
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(request: Request):
+    supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not supplied or not hmac.compare_digest(supplied, webhook_secret()):
+        log.warning("Rejected Telegram webhook request: invalid secret")
+        raise HTTPException(status_code=403, detail="Invalid webhook secret")
+    try:
+        payload = await request.json()
+        update = Update.model_validate(payload)
+        await dp.feed_update(bot, update)
+        return {"ok": True}
     except Exception as exc:
-        log.exception('Telegram webhook failed')
-        raise HTTPException(500,'Webhook processing failed') from exc
-@app.get('/')
-async def home():return FileResponse(STATIC/'index.html',headers={'Cache-Control':'no-store'})
-@app.get('/miniapp')
-async def miniapp():return FileResponse(STATIC/'index.html',headers={'Cache-Control':'no-store'})
-async def room_for(code):
-    async with Session() as s:r=await s.scalar(select(Room).where(Room.code==code.upper(),Room.is_active.is_(True)))
-    if not r:raise HTTPException(404,'Room tidak ditemukan')
-    return r
-@app.get('/api/rooms/{code}')
-async def room_api(code:str,init_data:str=''):
-    u=user(init_data);r=await room_for(code)
-    if not u:raise HTTPException(401,'Telegram auth required')
-    async with Session() as s:
-        member=await s.scalar(select(Member).where(Member.room_id==r.id,Member.user_id==int(u['id'])))
-        if not member:raise HTTPException(403,'Join room terlebih dahulu')
-        n=await s.scalar(select(func.count()).select_from(Member).where(Member.room_id==r.id));f=await s.scalar(select(Film).where(Film.room_id==r.id,Film.status=='ready').order_by(Film.created_at.desc()))
-    return {'room':{'code':r.code,'title':r.title,'group_id':r.group_chat_id,'host_id':r.host_user_id,'is_host':int(u['id'])==r.host_user_id,'playing':r.is_playing,'position':r.position,'updated_at':r.updated_at.isoformat()},'members':n,'film':({'title':f.title,'size':f.size_bytes,'mime':f.mime_type,'url':presigned_get(f.object_key)} if f else None)}
-@app.get('/api/dashboard/{group_id}')
-async def dashboard(group_id:int,init_data:str=''):
-    u=user(init_data)
-    if not u:raise HTTPException(401,'Telegram auth required')
-    uid=int(u['id'])
-    async with Session() as s:
-        allowed=await s.scalar(select(Member.id).join(Room,Room.id==Member.room_id).where(Room.group_chat_id==group_id,Member.user_id==uid,Room.is_active.is_(True)).limit(1))
-        if allowed is None:raise HTTPException(403,'Akses dashboard GC ditolak')
-        rows=(await s.scalars(select(Room).where(Room.group_chat_id==group_id,Room.is_active.is_(True)).order_by(Room.created_at.desc()).limit(30))).all();out=[]
-        for r in rows:
-            n=await s.scalar(select(func.count()).select_from(Member).where(Member.room_id==r.id));out.append({'code':r.code,'title':r.title,'host_id':r.host_user_id,'members':n,'playing':r.is_playing,'position':r.position})
-    return {'group_id':group_id,'rooms':out}
-class SyncIn(BaseModel):init_data:str='';playing:bool=False;position:float=Field(ge=0)
-@app.post('/api/sync/{code}')
-async def sync(code:str,p:SyncIn):
-    u=user(p.init_data);r=await room_for(code)
-    if not u or int(u['id'])!=r.host_user_id:raise HTTPException(403,'Host only')
-    async with Session() as s:x=await s.get(Room,r.id);x.is_playing=p.playing;x.position=p.position;await s.commit()
-    return {'ok':True}
-class UploadIn(BaseModel):init_data:str='';title:str=Field(min_length=1,max_length=255);size:int=Field(gt=0,le=5*1024**3);mime:str='video/mp4'
-@app.post('/api/upload/{code}')
-async def upload(code:str,p:UploadIn):
-    u=user(p.init_data);r=await room_for(code)
-    if not u or int(u['id'])!=r.host_user_id:raise HTTPException(403,'Host only')
-    key=f'films/{r.group_chat_id}/{r.code}/{secrets.token_hex(12)}-{p.title.replace("/","_")}'
-    async with Session() as s:
-        s.add(Film(room_id=r.id,owner_user_id=r.host_user_id,title=p.title,object_key=key,size_bytes=p.size,mime_type=p.mime));await s.commit()
-    return {'upload_url':presigned_put(key,p.mime),'object_key':key}
+        log.exception("Telegram update processing failed")
+        raise HTTPException(status_code=500, detail="Webhook processing failed") from exc
+
+
+@app.get("/")
+async def home():
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/miniapp")
+async def miniapp():
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-store"})
+
+
+async def room_for(code: str):
+    async with Session() as session:
+        room = await session.scalar(select(Room).where(Room.code == code.upper(), Room.is_active.is_(True)))
+    if not room:
+        raise HTTPException(404, "Room tidak ditemukan")
+    return room
+
+
+@app.get("/api/dashboard/{group_id}")
+async def dashboard(group_id: int, init_data: str = ""):
+    user = telegram_user(init_data)
+    if not user:
+        raise HTTPException(401, "Telegram auth required")
+    uid = int(user["id"])
+    async with Session() as session:
+        allowed = await session.scalar(
+            select(Member.id)
+            .join(Room, Room.id == Member.room_id)
+            .where(Room.group_chat_id == group_id, Member.user_id == uid, Room.is_active.is_(True))
+            .limit(1)
+        )
+        if allowed is None:
+            raise HTTPException(403, "Akses dashboard GC ditolak")
+        rooms = (
+            await session.scalars(
+                select(Room)
+                .where(Room.group_chat_id == group_id, Room.is_active.is_(True))
+                .order_by(Room.created_at.desc())
+                .limit(30)
+            )
+        ).all()
+        result = []
+        for room in rooms:
+            members = await session.scalar(select(func.count()).select_from(Member).where(Member.room_id == room.id))
+            result.append({
+                "code": room.code,
+                "title": room.title,
+                "host_id": room.host_user_id,
+                "members": members,
+                "playing": room.is_playing,
+                "position": room.position,
+            })
+    return {"group_id": group_id, "rooms": result}
+
+
+@app.get("/api/rooms/{code}")
+async def room_api(code: str, init_data: str = ""):
+    user = telegram_user(init_data)
+    if not user:
+        raise HTTPException(401, "Telegram auth required")
+    room = await room_for(code)
+    uid = int(user["id"])
+    async with Session() as session:
+        member = await session.scalar(select(Member).where(Member.room_id == room.id, Member.user_id == uid))
+        if not member:
+            raise HTTPException(403, "Join room terlebih dahulu")
+        members = await session.scalar(select(func.count()).select_from(Member).where(Member.room_id == room.id))
+        film = await session.scalar(
+            select(Film).where(Film.room_id == room.id, Film.status == "ready").order_by(Film.created_at.desc())
+        )
+    return {
+        "room": {
+            "code": room.code,
+            "title": room.title,
+            "group_id": room.group_chat_id,
+            "host_id": room.host_user_id,
+            "is_host": uid == room.host_user_id,
+            "playing": room.is_playing,
+            "position": room.position,
+            "updated_at": room.updated_at.isoformat(),
+        },
+        "members": members,
+        "film": ({
+            "title": film.title,
+            "size": film.size_bytes,
+            "mime": film.mime_type,
+            "url": presigned_get(film.object_key),
+        } if film else None),
+    }
+
+
+class SyncIn(BaseModel):
+    init_data: str = ""
+    playing: bool = False
+    position: float = Field(ge=0)
+
+
+@app.post("/api/sync/{code}")
+async def sync(code: str, payload: SyncIn):
+    user = telegram_user(payload.init_data)
+    room = await room_for(code)
+    if not user or int(user["id"]) != room.host_user_id:
+        raise HTTPException(403, "Host only")
+    async with Session() as session:
+        current = await session.get(Room, room.id)
+        current.is_playing = payload.playing
+        current.position = payload.position
+        await session.commit()
+    return {"ok": True}
+
+
+class UploadIn(BaseModel):
+    init_data: str = ""
+    title: str = Field(min_length=1, max_length=255)
+    size: int = Field(gt=0, le=5 * 1024**3)
+    mime: str = "video/mp4"
+
+
+@app.post("/api/upload/{code}")
+async def upload(code: str, payload: UploadIn):
+    user = telegram_user(payload.init_data)
+    room = await room_for(code)
+    if not user or int(user["id"]) != room.host_user_id:
+        raise HTTPException(403, "Host only")
+    key = f"films/{room.group_chat_id}/{room.code}/{secrets.token_hex(12)}-{payload.title.replace('/', '_')}"
+    async with Session() as session:
+        session.add(Film(
+            room_id=room.id,
+            owner_user_id=room.host_user_id,
+            title=payload.title,
+            object_key=key,
+            size_bytes=payload.size,
+            mime_type=payload.mime,
+        ))
+        await session.commit()
+    return {"upload_url": presigned_put(key, payload.mime), "object_key": key}
