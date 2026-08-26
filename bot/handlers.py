@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from aiogram import Bot, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 from sqlalchemy import func, or_, select
 
 from config import settings
@@ -20,7 +20,11 @@ def make_code() -> str:
 
 def room_button(room: Room, upload: bool = False) -> InlineKeyboardMarkup:
     url = f"{settings.webapp_url}/miniapp?room={room.code}&upload={1 if upload else 0}"
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎬 Buka NOBAR", web_app=WebAppInfo(url=url))]])
+    rows = [
+        [InlineKeyboardButton(text="🎬 Buka NOBAR", web_app=WebAppInfo(url=url))],
+        [InlineKeyboardButton(text="🔗 Share ke Grup", callback_data=f"share:{room.id}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def dashboard_button(group_id: int) -> InlineKeyboardMarkup:
@@ -39,36 +43,16 @@ async def channel_access(bot: Bot, user_id: int) -> bool:
 async def ensure_user(user) -> None:
     async with Session() as session:
         now = datetime.now(timezone.utc)
-
-        # The production database contains legacy rows where the Telegram ID
-        # is stored in telegram_id while user_id was an old numeric PK. Never
-        # INSERT a second row just because the immutable Telegram ID is not
-        # equal to that legacy PK.
-        result = await session.execute(
-            select(User)
-            .where(or_(User.user_id == user.id, User.telegram_id == user.id))
-            .limit(1)
-        )
+        result = await session.execute(select(User).where(or_(User.user_id == user.id, User.telegram_id == user.id)).limit(1))
         row = result.scalar_one_or_none()
-
         if row is None:
-            session.add(
-                User(
-                    user_id=user.id,
-                    telegram_id=user.id,
-                    username=user.username,
-                    first_name=user.first_name,
-                    updated_at=now,
-                    last_seen=now,
-                )
-            )
+            session.add(User(user_id=user.id, telegram_id=user.id, username=user.username, first_name=user.first_name, updated_at=now, last_seen=now))
         else:
             row.telegram_id = user.id
             row.username = user.username
             row.first_name = user.first_name
             row.updated_at = now
             row.last_seen = now
-
         await session.commit()
 
 
@@ -84,18 +68,7 @@ async def start(message: Message, bot: Bot):
     await ensure_user(message.from_user)
     if not await require_channel(message, bot):
         return
-    text = (
-        "🎬 <b>NOBAR</b>\n\n"
-        "Watch party Telegram untuk GC. Film disimpan permanen di Backblaze B2, "
-        "bukan di Railway.\n\n"
-        "• /nobar — buat room\n"
-        "• /join KODE — masuk room\n"
-        "• /rooms — room aktif\n"
-        "• /room KODE — status\n"
-        "• /play KODE — buka player\n"
-        "• /upload KODE — upload film (host)\n"
-        "• /feedback — kirim masukan"
-    )
+    text = "🎬 <b>NOBAR</b>\n\nWatch party Telegram untuk GC.\n\nGunakan tombol di bawah atau /help."
     await message.answer(text, reply_markup=dashboard_button(message.chat.id) if message.chat.type in {"group", "supergroup"} else None)
 
 
@@ -103,16 +76,7 @@ async def start(message: Message, bot: Bot):
 async def help_command(message: Message, bot: Bot):
     if not await require_channel(message, bot):
         return
-    await message.answer(
-        "🎬 <b>NOBAR — Commands</b>\n\n"
-        "/nobar [judul] — buat room di GC\n"
-        "/join KODE — gabung room\n"
-        "/rooms — lihat semua room aktif\n"
-        "/room KODE — detail room\n"
-        "/play KODE — buka player\n"
-        "/upload KODE — upload film\n"
-        "/feedback — kirim feedback"
-    )
+    await message.answer("🎬 <b>NOBAR — Commands</b>\n\n/nobar [judul] — buat room\n/join KODE — gabung room\n/rooms — room aktif\n/room KODE — info room\n/play KODE — buka player\n/upload KODE — upload film\n/invite — share room ke grup\n/feedback — feedback")
 
 
 @router.message(Command("nobar"))
@@ -132,10 +96,7 @@ async def create_room(message: Message, bot: Bot):
         session.add(room)
         session.add(Member(room=room, user_id=message.from_user.id))
         await session.commit()
-    await message.answer(
-        f"🍿 <b>{html.escape(title)}</b>\n\nRoom: <code>{code}</code>\nHost: @{html.escape(message.from_user.username or str(message.from_user.id))}",
-        reply_markup=room_button(room, upload=True),
-    )
+    await message.answer(f"🍿 <b>{html.escape(title)}</b>\n\nRoom: <code>{code}</code>\nHost: @{html.escape(message.from_user.username or str(message.from_user.id))}", reply_markup=room_button(room, upload=True))
 
 
 @router.message(Command("join"))
@@ -146,10 +107,9 @@ async def join_room(message: Message, bot: Bot):
     if len(parts) != 2:
         await message.answer("Gunakan: /join KODE")
         return
-    code = parts[1].strip().upper()
     await ensure_user(message.from_user)
     async with Session() as session:
-        room = await session.scalar(select(Room).where(Room.code == code, Room.is_active.is_(True)))
+        room = await session.scalar(select(Room).where(Room.code == parts[1].strip().upper(), Room.is_active.is_(True)))
         if not room:
             await message.answer("❌ Room tidak ditemukan atau sudah ditutup.")
             return
@@ -157,7 +117,7 @@ async def join_room(message: Message, bot: Bot):
         if not exists:
             session.add(Member(room_id=room.id, user_id=message.from_user.id))
             await session.commit()
-    await message.answer(f"✅ Kamu masuk room <code>{code}</code>.", reply_markup=room_button(room))
+    await message.answer(f"✅ Kamu masuk room <code>{room.code}</code>.", reply_markup=room_button(room))
 
 
 @router.message(Command("rooms"))
@@ -189,13 +149,7 @@ async def room_info(message: Message, bot: Bot):
             await message.answer("❌ Room tidak ditemukan.")
             return
         count = await session.scalar(select(func.count(Member.id)).where(Member.room_id == room.id))
-    await message.answer(
-        f"🎬 <b>{html.escape(room.title)}</b>\n\n"
-        f"Kode: <code>{room.code}</code>\n"
-        f"Member: {count}\n"
-        f"Status: {'🟢 aktif' if room.is_active else '🔴 ditutup'}",
-        reply_markup=room_button(room),
-    )
+    await message.answer(f"🎬 <b>{html.escape(room.title)}</b>\n\nKode: <code>{room.code}</code>\nMember: {count}\nStatus: {'🟢 aktif' if room.is_active else '🔴 ditutup'}", reply_markup=room_button(room))
 
 
 @router.message(Command("play"))
@@ -231,7 +185,91 @@ async def upload_room(message: Message, bot: Bot):
     if room.host_id != message.from_user.id:
         await message.answer("❌ Hanya host yang dapat mengupload film.")
         return
-    await message.answer("📤 Buka NOBAR untuk upload film langsung ke B2.", reply_markup=room_button(room, upload=True))
+    await message.answer("📤 Kirim film langsung ke bot. Setelah diterima, NOBAR akan mengecek SHA-256 dan menyimpannya ke B2 jika belum ada.")
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("share:"))
+async def share_room(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    await ensure_user(callback.from_user)
+    room_id = int(callback.data.split(":", 1)[1])
+    async with Session() as session:
+        room = await session.scalar(select(Room).where(Room.id == room_id, Room.is_active.is_(True)))
+    if not room:
+        await callback.message.answer("❌ Room sudah tidak aktif.")
+        return
+    # Telegram bots cannot enumerate every group a user belongs to. We can only
+    # offer groups where this bot has previously observed the user and where
+    # the bot can currently query the user's membership.
+    groups = {}
+    async with Session() as session:
+        result = await session.execute(
+            select(Room.group_id)
+            .join(Member, Member.room_id == Room.id)
+            .where(Member.user_id == callback.from_user.id)
+            .distinct()
+        )
+        for (group_id,) in result.all():
+            groups[group_id] = group_id
+    valid = []
+    for group_id in groups:
+        try:
+            bot_member = await bot.get_chat_member(group_id, (await bot.me()).id)
+            if bot_member.status not in {"administrator", "creator"}:
+                continue
+            user_member = await bot.get_chat_member(group_id, callback.from_user.id)
+            if user_member.status not in {"member", "administrator", "creator"}:
+                continue
+            chat = await bot.get_chat(group_id)
+            valid.append((group_id, chat.title or str(group_id)))
+        except Exception:
+            continue
+    if not valid:
+        await callback.message.answer("⚠️ Tidak ada grup yang bisa dipilih. Pastikan kamu masih menjadi member grup dan bot NOBAR masih ada serta memiliki akses yang diperlukan.")
+        return
+    rows = [[InlineKeyboardButton(text=f"👥 {title[:45]}", callback_data=f"shareto:{room.id}:{group_id}")] for group_id, title in valid]
+    rows.append([InlineKeyboardButton(text="❌ Batal", callback_data="sharecancel")])
+    await callback.message.answer("🔗 <b>SHARE NOBAR</b>\n\nPilih grup tujuan:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("shareto:"))
+async def share_to_group(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    _, room_id_raw, group_id_raw = callback.data.split(":", 2)
+    room_id = int(room_id_raw)
+    group_id = int(group_id_raw)
+    async with Session() as session:
+        room = await session.scalar(select(Room).where(Room.id == room_id, Room.is_active.is_(True)))
+    if not room:
+        await callback.message.answer("❌ Room sudah tidak aktif.")
+        return
+    try:
+        bot_me = await bot.me()
+        bot_member = await bot.get_chat_member(group_id, bot_me.id)
+        user_member = await bot.get_chat_member(group_id, callback.from_user.id)
+        if bot_member.status not in {"administrator", "creator"} or user_member.status not in {"member", "administrator", "creator"}:
+            raise RuntimeError("access")
+        invite_url = f"https://t.me/{bot_me.username}?start=room_{room.code}"
+        await bot.send_message(group_id, f"🎬 <b>NOBAR</b>\n\n🎞️ {html.escape(room.title)}\n🔑 Room: <code>{room.code}</code>\n👑 Host: @{html.escape(str(callback.from_user.username or callback.from_user.id))}\n\nYuk ikut nonton bareng!", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎬 GABUNG NOBAR", url=invite_url)]]))
+        await callback.message.answer("✅ Undangan NOBAR sudah dikirim ke grup tersebut.")
+    except Exception:
+        await callback.message.answer("❌ Bot tidak dapat mengirim ke grup tersebut. Pastikan bot masih ada dan memiliki akses yang diperlukan.")
+
+
+@router.callback_query(lambda c: c.data == "sharecancel")
+async def share_cancel(callback: CallbackQuery):
+    await callback.answer("Dibatalkan")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+
+@router.message(Command("invite"))
+async def invite_command(message: Message, bot: Bot):
+    if not await require_channel(message, bot):
+        return
+    await message.answer("🔗 Buka room lalu tekan tombol <b>Share ke Grup</b> untuk memilih grup tujuan.")
 
 
 @router.message(Command("feedback"))
