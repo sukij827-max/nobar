@@ -14,13 +14,11 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    # Legacy production schema uses telegram_id as NOT NULL. Keep it as a
-    # compatibility alias so existing data is preserved while user_id remains
-    # the application identity key.
     telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     username: Mapped[str | None] = mapped_column(String(255))
     first_name: Mapped[str | None] = mapped_column(String(255))
-    is_premium: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_premium: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_banned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -93,25 +91,26 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-        # Production already has a legacy telegram_id column marked NOT NULL.
-        # Keep it as an alias of user_id instead of dropping/renaming it, so no
-        # existing user rows are lost. The migration also works if the column
-        # does not exist yet.
-        await conn.execute(text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT"
-        ))
-        await conn.execute(text(
-            "UPDATE users SET telegram_id = user_id WHERE telegram_id IS NULL"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE users ALTER COLUMN telegram_id SET NOT NULL"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT FALSE"
-        ))
-        await conn.execute(text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"
-        ))
+        # Keep compatibility with the existing production schema without
+        # dropping or renaming legacy columns/data.
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT"))
+        await conn.execute(text("UPDATE users SET telegram_id = user_id WHERE telegram_id IS NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN telegram_id SET NOT NULL"))
+
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT FALSE"))
+        await conn.execute(text("UPDATE users SET is_premium = FALSE WHERE is_premium IS NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_premium SET DEFAULT FALSE"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_premium SET NOT NULL"))
+
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE"))
+        await conn.execute(text("UPDATE users SET is_banned = FALSE WHERE is_banned IS NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_banned SET DEFAULT FALSE"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_banned SET NOT NULL"))
+
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"))
+        await conn.execute(text("UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP"))
+        await conn.execute(text("ALTER TABLE users ALTER COLUMN updated_at SET NOT NULL"))
 
 
 async def close_db() -> None:
