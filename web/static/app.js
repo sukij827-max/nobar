@@ -1,72 +1,17 @@
 const tg = window.Telegram?.WebApp;
 tg?.ready();
 tg?.expand();
-
-const qs = new URLSearchParams(location.search);
-const startParam = tg?.initDataUnsafe?.start_param || '';
-const roomFromStart = startParam.match(/^room[_-]([A-Za-z0-9]+)$/i)?.[1] || '';
-const code = (qs.get('room') || roomFromStart || '').toUpperCase();
-const groupId = qs.get('group_id');
-const init = tg?.initData || '';
-const app = document.querySelector('#app');
-let syncTimer = null;
-let syncing = false;
-
-async function api(url, options = {}) {
-  const res = await fetch(url, options);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.detail || 'Request gagal');
-  return data;
-}
-function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c])); }
-function fmtBytes(n) { if (!n) return '0 B'; const u=['B','KB','MB','GB']; const i=Math.min(Math.floor(Math.log(n)/Math.log(1024)),3); return `${(n/1024**i).toFixed(i?1:0)} ${u[i]}`; }
-
-async function dashboard() {
-  try {
-    const d=await api(`/api/dashboard/${encodeURIComponent(groupId)}?init_data=${encodeURIComponent(init)}`);
-    app.innerHTML=`<h1>🎬 NOBAR</h1><p class="muted">Room aktif di GC</p>`+(d.rooms.length?d.rooms.map(r=>`<section class="card"><b>${esc(r.title)}</b><p class="muted"><code>${esc(r.code)}</code> · 👥 ${r.members} · ${r.has_film?'🎞️ Film siap':'📭 Belum ada film'} · ${r.playing?'▶️ Playing':'⏸️ Paused'}</p><button onclick="location.href='/miniapp?room=${encodeURIComponent(r.code)}'">Buka Room</button></section>`).join(''):`<section class="card">Belum ada room aktif.</section>`);
-  } catch(e) { app.innerHTML=`<section class="card"><h2>⚠️ Dashboard gagal</h2><p class="muted">${esc(e.message)}</p></section>`; }
-}
-
-async function room() {
-  try { const d=await api(`/api/rooms/${encodeURIComponent(code)}?init_data=${encodeURIComponent(init)}`); renderRoom(d); }
-  catch(e) { app.innerHTML=`<section class="card"><h2>⚠️ Room gagal dimuat</h2><p class="muted">${esc(e.message)}</p></section>`; }
-}
-
-function renderRoom(d) {
-  const r=d.room, film=d.film, host=!!r.is_host;
-  app.innerHTML=`<header><h1>🎬 ${esc(r.title)}</h1><p class="muted">Room <code>${esc(r.code)}</code> · 👥 ${d.members} ${host?'· 👑 Host':''}</p></header>
-  <section class="card">${film?`<div class="film-title">🎞️ ${esc(film.title)} <small>(${fmtBytes(film.size)})</small></div>
-  <video id="video" ${host?'controls':''} playsinline preload="metadata" src="${esc(film.url)}"></video>
-  ${host?`<div class="row" style="margin-top:12px"><button id="toggle">${r.playing?'⏸️ Pause':'▶️ Play'}</button><button class="secondary" id="seek">↗️ Sync posisi</button></div><div class="status">👑 Host mengontrol pemutaran untuk semua peserta.</div>`:`<div class="status">👀 Kamu penonton. Pemutaran dikontrol oleh host.</div>`}`:'<p class="muted">Host belum memilih film untuk room ini.</p>'}</section>`;
-
-  const v=document.querySelector('#video'); if(!v) return;
-  v.currentTime=Number(r.position||0);
-  if(host) {
-    const toggle=document.querySelector('#toggle');
-    toggle.onclick=async()=>{ const playing=v.paused; await sync(r.code,playing,v.currentTime); if(playing) await v.play().catch(()=>{}); else v.pause(); toggle.textContent=playing?'⏸️ Pause':'▶️ Play'; };
-    document.querySelector('#seek').onclick=()=>sync(r.code,!v.paused,v.currentTime);
-    v.addEventListener('play',()=>{if(!syncing) sync(r.code,true,v.currentTime).catch(()=>{});});
-    v.addEventListener('pause',()=>{if(!syncing) sync(r.code,false,v.currentTime).catch(()=>{});});
-    v.addEventListener('seeked',()=>{if(!syncing) sync(r.code,!v.paused,v.currentTime).catch(()=>{});});
-  } else {
-    // Viewers have NO native controls and therefore cannot press the play/pause
-    // triangle, pause, seek, or otherwise change playback. Host state is authoritative.
-    if(syncTimer) clearInterval(syncTimer);
-    syncTimer=setInterval(async()=>{
-      try {
-        const x=await api(`/api/rooms/${encodeURIComponent(code)}?init_data=${encodeURIComponent(init)}`);
-        syncing=true;
-        if(Math.abs(v.currentTime-x.room.position)>1.5) v.currentTime=x.room.position;
-        if(x.room.playing && v.paused) await v.play().catch(()=>{});
-        if(!x.room.playing && !v.paused) v.pause();
-      } catch {} finally { syncing=false; }
-    },1000);
-  }
-}
-
-async function sync(roomCode,playing,position) {
-  await api(`/api/sync/${encodeURIComponent(roomCode)}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({init_data:init,playing,position})});
-}
-
-if(groupId) dashboard(); else if(code) room(); else app.innerHTML='<section class="card"><h1>🎬 NOBAR</h1><p class="muted">Buka NOBAR dari tombol undangan di Telegram.</p></section>';
+const qs=new URLSearchParams(location.search), startParam=tg?.initDataUnsafe?.start_param||'';
+const roomFromStart=startParam.match(/^room[_-]([A-Za-z0-9]+)$/i)?.[1]||'';
+const code=(qs.get('room')||roomFromStart||'').toUpperCase(), groupId=qs.get('group_id'), init=tg?.initData||'', app=document.querySelector('#app');
+let syncTimer=null,syncing=false;
+async function api(url,o={}){const r=await fetch(url,o),d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||'Request gagal');return d}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
+function fmtBytes(n){if(!n)return'0 B';const u=['B','KB','MB','GB'],i=Math.min(Math.floor(Math.log(n)/Math.log(1024)),3);return`${(n/1024**i).toFixed(i?1:0)} ${u[i]}`}
+function orientationButtons(){return`<div class="orientation"><button class="secondary" id="portrait">📱 Tegak</button><button class="secondary" id="landscape">🖥️ Miring</button><button class="secondary" id="fullscreen">⛶ Layar penuh</button></div>`}
+async function setOrientation(mode){try{if(mode==='landscape'&&screen.orientation?.lock)await screen.orientation.lock('landscape');else if(mode==='portrait'&&screen.orientation?.lock)await screen.orientation.lock('portrait');else if(mode==='fullscreen'&&document.documentElement.requestFullscreen)await document.documentElement.requestFullscreen();}catch{if(mode==='fullscreen'&&!document.fullscreenElement)await document.documentElement.requestFullscreen?.().catch(()=>{})}}
+async function room(){try{const d=await api(`/api/rooms/${encodeURIComponent(code)}?init_data=${encodeURIComponent(init)}`);renderRoom(d)}catch(e){app.innerHTML=`<section class="card"><h2>⚠️ Room gagal dimuat</h2><p class="muted">${esc(e.message)}</p></section>`}}
+function renderRoom(d){const r=d.room,film=d.film,host=!!r.is_host;app.innerHTML=`<header><h1>🎬 ${esc(r.title)}</h1><p class="muted">Room <code>${esc(r.code)}</code> · 👥 ${d.members} ${host?'· 👑 Host':''}</p></header><section class="card">${film?`<div class="film-title">🎞️ ${esc(film.title)} <small>(${fmtBytes(film.size)})</small></div><video id="video" ${host?'controls':''} playsinline preload="metadata" src="${esc(film.url)}"></video>${orientationButtons()}${host?`<div class="row" style="margin-top:12px"><button id="toggle">${r.playing?'⏸️ Pause':'▶️ Play'}</button><button class="secondary" id="seek">↗️ Sync posisi</button></div><div class="status">👑 Host mengontrol pemutaran untuk semua peserta.</div>`:`<div class="status">👀 Kamu penonton. Pemutaran dikontrol host. Volume dan orientasi layar hanya untuk perangkatmu.</div>`}`:'<p class="muted">Host belum memilih film untuk room ini.</p>'}</section>`;const v=document.querySelector('#video');if(!v)return;document.querySelector('#portrait').onclick=()=>setOrientation('portrait');document.querySelector('#landscape').onclick=()=>setOrientation('landscape');document.querySelector('#fullscreen').onclick=()=>setOrientation('fullscreen');v.currentTime=Number(r.position||0);
+if(host){const toggle=document.querySelector('#toggle');toggle.onclick=async()=>{const playing=v.paused;await sync(r.code,playing,v.currentTime);if(playing)await v.play().catch(()=>{});else v.pause();toggle.textContent=playing?'⏸️ Pause':'▶️ Play'};document.querySelector('#seek').onclick=()=>sync(r.code,!v.paused,v.currentTime);v.addEventListener('play',()=>{if(!syncing)sync(r.code,true,v.currentTime).catch(()=>{})});v.addEventListener('pause',()=>{if(!syncing)sync(r.code,false,v.currentTime).catch(()=>{})});v.addEventListener('seeked',()=>{if(!syncing)sync(r.code,!v.paused,v.currentTime).catch(()=>{})})}else{if(syncTimer)clearInterval(syncTimer);syncTimer=setInterval(async()=>{try{const x=await api(`/api/rooms/${encodeURIComponent(code)}?init_data=${encodeURIComponent(init)}`);syncing=true;if(Math.abs(v.currentTime-x.room.position)>1.5)v.currentTime=x.room.position;if(x.room.playing&&v.paused)await v.play().catch(()=>{});if(!x.room.playing&&!v.paused)v.pause()}catch{}finally{syncing=false}},1000)}}
+async function sync(roomCode,playing,position){await api(`/api/sync/${encodeURIComponent(roomCode)}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({init_data:init,playing,position})})}
+if(groupId){}else if(code)room();else app.innerHTML='<section class="card"><h1>🎬 NOBAR</h1><p class="muted">Buka NOBAR dari tombol undangan di Telegram.</p></section>';
