@@ -105,7 +105,11 @@ async def dashboard(group_id: int, init_data: str = ""):
         result = []
         for room in rooms:
             members = await session.scalar(select(func.count()).select_from(Member).where(Member.room_id == room.id))
-            film = await session.scalar(select(Film).where(Film.room_id == room.id, Film.status == "ready").order_by(Film.created_at.desc()))
+            film = None
+            if room.film_id:
+                film = await session.scalar(select(Film).where(Film.id == room.film_id, Film.status == "ready"))
+            if film is None:
+                film = await session.scalar(select(Film).where(Film.room_id == room.id, Film.status == "ready").order_by(Film.created_at.desc()))
             result.append({"code": room.code, "title": room.title, "host_id": room.host_user_id, "members": members, "playing": room.is_playing, "position": room.position, "has_film": bool(film)})
     return {"group_id": group_id, "rooms": result}
 
@@ -117,10 +121,18 @@ async def room_api(code: str, init_data: str = ""):
     async with Session() as session:
         room = await room_for(session, code)
         member = await session.scalar(select(Member.id).where(Member.room_id == room.id, Member.user_id == uid))
+        # Direct Mini App links are the actual JOIN action. A viewer opening a
+        # valid room invitation is automatically registered instead of being
+        # bounced to /start or asked to join again in the bot.
         if member is None:
-            raise HTTPException(403, "Join room terlebih dahulu via /join KODE")
+            session.add(Member(room_id=room.id, user_id=uid))
+            await session.commit()
         members = await session.scalar(select(func.count()).select_from(Member).where(Member.room_id == room.id))
-        film = await session.scalar(select(Film).where(Film.room_id == room.id, Film.status == "ready").order_by(Film.created_at.desc()))
+        film = None
+        if room.film_id:
+            film = await session.scalar(select(Film).where(Film.id == room.film_id, Film.status == "ready"))
+        if film is None:
+            film = await session.scalar(select(Film).where(Film.room_id == room.id, Film.status == "ready").order_by(Film.created_at.desc()))
     return {"room": {"code": room.code, "title": room.title, "group_id": room.group_chat_id, "host_id": room.host_user_id, "is_host": uid == room.host_user_id, "playing": room.is_playing, "position": room.position, "updated_at": room.updated_at.isoformat()}, "members": members, "film": ({"title": film.title, "size": film.size_bytes, "mime": film.mime_type, "url": presigned_get(film.object_key)} if film else None)}
 
 
@@ -220,6 +232,8 @@ async def upload_complete(code: str, payload: CompleteUploadIn):
             raise HTTPException(502, f"Gagal menyelesaikan upload: {exc}")
         film = Film(room_id=room.id, owner_user_id=uid, title=upload.title, object_key=upload.object_key, size_bytes=actual, mime_type=upload.mime_type, status="ready")
         session.add(film)
+        await session.flush()
+        room.film_id = film.id
         upload.status = "completed"
         await session.commit()
     return {"ok": True, "title": upload.title}
