@@ -6,6 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from config import settings
+from bot.direct_room import router as direct_room_router
 from bot.handlers import router
 
 log = logging.getLogger("nobar.telegram")
@@ -15,6 +16,9 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
+# Direct-room callbacks/commands must be checked first so the legacy
+# group-only /nobar handler does not intercept them.
+dp.include_router(direct_room_router)
 dp.include_router(router)
 
 _polling_task: asyncio.Task | None = None
@@ -52,8 +56,6 @@ async def start_polling() -> None:
     if _polling_task and not _polling_task.done():
         return
 
-    # Polling and webhook are mutually exclusive. Remove any stale webhook
-    # before the ONLY Telegram consumer is started.
     await bot.delete_webhook(drop_pending_updates=False)
     me = await bot.get_me()
     log.info("Telegram bot verified: @%s (%s)", me.username, me.id)
