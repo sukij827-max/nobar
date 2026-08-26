@@ -24,6 +24,24 @@ class User(Base):
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
+class Group(Base):
+    __tablename__ = "nobar_groups"
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str] = mapped_column(String(255))
+    chat_type: Mapped[str] = mapped_column(String(30), default="supergroup")
+    bot_is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class GroupMember(Base):
+    __tablename__ = "nobar_group_members"
+    __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_nobar_group_member"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class Room(Base):
     __tablename__ = "rooms"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -54,6 +72,7 @@ class Film(Base):
     owner_user_id: Mapped[int] = mapped_column(BigInteger)
     title: Mapped[str] = mapped_column(String(255))
     object_key: Mapped[str] = mapped_column(String(700), unique=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
     mime_type: Mapped[str] = mapped_column(String(120), default="video/mp4")
     status: Mapped[str] = mapped_column(String(20), default="ready")
@@ -79,7 +98,7 @@ class Feedback(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     username: Mapped[str | None] = mapped_column(String(255))
-    kind: Mapped[str] = mapped_column(String(30))
+    kind: Mapped[str] = mapped_column(String(30), default="feedback")
     message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -91,32 +110,32 @@ Session = async_sessionmaker(engine, expire_on_commit=False)
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-        # Keep compatibility with the existing production schema without
-        # dropping or renaming legacy columns/data.
-        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT"))
-        await conn.execute(text("UPDATE users SET telegram_id = user_id WHERE telegram_id IS NULL"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN telegram_id SET NOT NULL"))
-
-        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT FALSE"))
-        await conn.execute(text("UPDATE users SET is_premium = FALSE WHERE is_premium IS NULL"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_premium SET DEFAULT FALSE"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_premium SET NOT NULL"))
-
-        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE"))
-        await conn.execute(text("UPDATE users SET is_banned = FALSE WHERE is_banned IS NULL"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_banned SET DEFAULT FALSE"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN is_banned SET NOT NULL"))
-
-        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"))
-        await conn.execute(text("UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN updated_at SET NOT NULL"))
-
-        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP"))
-        await conn.execute(text("UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE last_seen IS NULL"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN last_seen SET DEFAULT CURRENT_TIMESTAMP"))
-        await conn.execute(text("ALTER TABLE users ALTER COLUMN last_seen SET NOT NULL"))
+        statements = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id BIGINT",
+            "UPDATE users SET telegram_id = user_id WHERE telegram_id IS NULL",
+            "ALTER TABLE users ALTER COLUMN telegram_id SET NOT NULL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_premium BOOLEAN DEFAULT FALSE",
+            "UPDATE users SET is_premium = FALSE WHERE is_premium IS NULL",
+            "ALTER TABLE users ALTER COLUMN is_premium SET DEFAULT FALSE",
+            "ALTER TABLE users ALTER COLUMN is_premium SET NOT NULL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE",
+            "UPDATE users SET is_banned = FALSE WHERE is_banned IS NULL",
+            "ALTER TABLE users ALTER COLUMN is_banned SET DEFAULT FALSE",
+            "ALTER TABLE users ALTER COLUMN is_banned SET NOT NULL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP",
+            "UPDATE users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL",
+            "ALTER TABLE users ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE users ALTER COLUMN updated_at SET NOT NULL",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP",
+            "UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE last_seen IS NULL",
+            "ALTER TABLE users ALTER COLUMN last_seen SET DEFAULT CURRENT_TIMESTAMP",
+            "ALTER TABLE users ALTER COLUMN last_seen SET NOT NULL",
+            "ALTER TABLE films ADD COLUMN IF NOT EXISTS sha256 VARCHAR(64)",
+            "ALTER TABLE feedback ADD COLUMN IF NOT EXISTS kind VARCHAR(30) DEFAULT 'feedback'",
+        ]
+        for statement in statements:
+            await conn.execute(text(statement))
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_films_sha256 ON films (sha256)"))
 
 
 async def close_db() -> None:
