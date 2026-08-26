@@ -6,6 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from config import settings
+from bot.fixes import router as fixes_router
 from bot.direct_room import router as direct_room_router
 from bot.handlers import router
 
@@ -16,8 +17,10 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
-# Direct-room callbacks/commands must be checked first so the legacy
-# group-only /nobar handler does not intercept them.
+# Fix/router layer must be first so direct-room creation works in private and
+# group chats, group messages never receive private-only web_app buttons, and
+# deep-link joins/admin user pages are handled before legacy handlers.
+dp.include_router(fixes_router)
 dp.include_router(direct_room_router)
 dp.include_router(router)
 
