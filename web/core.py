@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
-from bot.runtime import bot, start_polling, stop_polling, _polling_task
+from bot import runtime
+from bot.runtime import bot, start_polling, stop_polling
 from config import settings
 from db import Film, Member, Room, Session, close_db, init_db
 from storage import presigned_get, presigned_put
@@ -70,7 +71,7 @@ async def health():
         me = None
         telegram_ok = False
         telegram_error = str(exc)
-    task = _polling_task
+    task = runtime._polling_task
     polling_active = bool(task and not task.done())
     return {
         "status": "ok" if telegram_ok and polling_active else "degraded",
