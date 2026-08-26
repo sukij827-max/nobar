@@ -27,7 +27,7 @@ async def set_commands():
     await bot.set_my_commands([
         BotCommand(command="start", description="Mulai NOBAR"),
         BotCommand(command="menu", description="Buka menu utama"),
-        BotCommand(command="nobar", description="Buat room di grup"),
+        BotCommand(command="nobar", description="Buat room langsung"),
         BotCommand(command="join", description="Join room dengan kode"),
         BotCommand(command="rooms", description="Lihat NOBAR aktif"),
         BotCommand(command="room", description="Info room"),
